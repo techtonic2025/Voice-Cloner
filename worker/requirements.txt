@@ -1,0 +1,5 @@
+fastapi
+python-multipart
+uvicorn[standard]
+soundfile
+qwen-tts==0.1.1

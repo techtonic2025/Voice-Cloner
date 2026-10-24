@@ -1,0 +1,7 @@
+.env
+api.txt
+data/
+uploads/
+outputs/
+node_modules/
+*.log
