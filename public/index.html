@@ -23,6 +23,11 @@
         <label>Il tuo campione vocale<input id="reference" type="file" accept="audio/*" /><small id="referenceStatus">Nessun file selezionato.</small></label>
         <p class="helper">La trascrizione del campione viene estratta automaticamente in locale sul worker: non devi scrivere ciò che dici nel vocale.</p>
         <button type="button" id="cloneButton">Crea la mia voce</button>
+        <section class="progress-panel" id="profileProgress" hidden aria-live="polite">
+          <div class="progress-heading"><strong id="progressTitle">Preparazione</strong><b id="progressPercent">0%</b></div>
+          <div class="progress-track"><span id="progressBar"></span></div>
+          <p id="progressDetail"></p>
+        </section>
         <p class="profile-status" id="profileStatus" aria-live="polite"></p>
       </section>
 

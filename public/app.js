@@ -4,6 +4,14 @@ const text = $('text');
 const result = $('result');
 let profileReady = false;
 
+function showProgress(title, percent, detail) {
+  $('profileProgress').hidden = false;
+  $('progressTitle').textContent = title;
+  $('progressPercent').textContent = `${percent}%`;
+  $('progressBar').style.width = `${percent}%`;
+  $('progressDetail').textContent = detail;
+}
+
 function updateCharacters() {
   $('characters').textContent = `${text.value.length.toLocaleString('it-IT')} caratteri`;
 }
@@ -18,15 +26,18 @@ reference.addEventListener('change', () => {
   $('referenceStatus').textContent = file
     ? `${file.name} selezionato. Ora premi “Crea la mia voce”.`
     : 'Nessun file selezionato.';
+  if (file) showProgress('Campione selezionato', 10, 'In attesa della creazione del profilo vocale.');
 });
 
 $('cloneButton').addEventListener('click', () => {
   const file = reference.files[0];
   const status = $('profileStatus');
   if (!file) {
+    showProgress('Manca il campione', 0, 'Scegli prima un audio con la tua voce.');
     status.textContent = 'Prima scegli un file audio della tua voce.';
     return;
   }
+  showProgress('Profilo vocale pronto', 100, 'Campione associato alla sessione. Quando premi “Genera con la mia voce”, il sistema avvierà la trascrizione automatica e la generazione.');
   profileReady = true;
   $('generateCard').hidden = false;
   status.textContent = '✓ La tua voce è pronta per questa sessione. Ora scrivi cosa deve dire.';
@@ -35,6 +46,7 @@ $('cloneButton').addEventListener('click', () => {
 
 $('generateButton').addEventListener('click', async () => {
   if (!profileReady) return;
+  showProgress('Controllo del job', 15, 'Controllo il budget prima di avviare una GPU.');
   result.hidden = false;
   result.innerHTML = '<p>Controllo budget e impostazioni...</p>';
   const payload = {
@@ -55,9 +67,11 @@ $('generateButton').addEventListener('click', async () => {
     });
     const data = await response.json();
     if (!response.ok) {
+      showProgress('Job da correggere', 0, data.error);
       result.innerHTML = `<h2>Controlla il job</h2><p>${data.error}</p>`;
       return;
     }
+    showProgress('Piano approvato', 25, 'Il collegamento automatico a Vast deve ancora essere attivato: non è stata noleggiata nessuna GPU.');
     result.innerHTML = `<h2>Profilo pronto, piano approvato</h2><div class="cost"><b>$${data.cost.estimatedGpuCost}</b><span>stima GPU per ${data.cost.totalMinutes} minuti</span></div><p>La parte che noleggia Vast e restituisce il WAV deve ancora essere collegata. Non è stato avviato alcun addebito.</p>`;
   } catch {
     result.innerHTML = '<h2>Server non raggiungibile</h2><p>Chiudi e riapri START.bat, poi ricarica questa pagina.</p>';
