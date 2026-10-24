@@ -9,30 +9,35 @@
   <body>
     <main>
       <section class="hero">
-        <span class="pill">La tua voce, quando ti serve</span>
+        <span class="pill">Le tue voci, sul tuo PC</span>
         <h1>Clova <em>Voice</em></h1>
-        <p>Prima prepari la tua voce. Poi incolli qualunque copione e scarichi l’audio generato.</p>
+        <p>Salva fino a tre profili vocali. Scegline uno, incolla un testo e genera il tuo voice-over.</p>
       </section>
 
-      <section class="warning">
-        <strong>Solo la tua voce o una voce autorizzata.</strong> La GPU cloud verrà usata soltanto per la generazione e distrutta subito dopo il download.
-      </section>
+      <section class="warning"><strong>Solo la tua voce o una voce autorizzata.</strong> I campioni restano salvati sul tuo PC. La GPU temporanea verrà distrutta al termine del lavoro.</section>
 
       <section class="card form" id="profileCard">
-        <div class="heading"><h2>1. Crea la tua voce</h2><p>Carica un vocale pulito di 10–30 secondi, senza musica o altre persone.</p></div>
-        <label>Il tuo campione vocale<input id="reference" type="file" accept="audio/*" /><small id="referenceStatus">Nessun file selezionato.</small></label>
-        <p class="helper">La trascrizione del campione viene estratta automaticamente in locale sul worker: non devi scrivere ciò che dici nel vocale.</p>
-        <button type="button" id="cloneButton">Crea la mia voce</button>
+        <div class="heading"><h2>Le mie voci</h2><p>Carica il campione una volta sola: poi sarà sempre selezionabile qui.</p></div>
+        <div class="voice-list" id="voiceList"><p class="muted">Caricamento delle voci salvate…</p></div>
+        <div class="new-voice" id="newVoicePanel">
+          <h3>Aggiungi una voce</h3>
+          <div class="two">
+            <label>Nome della voce<input id="voiceName" type="text" maxlength="60" placeholder="Es. Enzo Ufficiale" /></label>
+            <label>Campione vocale<input id="reference" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/ogg" /><small>Consigliati 30–120 secondi; massimo 75 MB.</small></label>
+          </div>
+          <p class="helper">Non devi trascrivere nulla: la voce viene analizzata automaticamente quando generi l’audio.</p>
+          <button type="button" id="saveVoiceButton">Salva questa voce</button>
+        </div>
         <section class="progress-panel" id="profileProgress" hidden aria-live="polite">
           <div class="progress-heading"><strong id="progressTitle">Preparazione</strong><b id="progressPercent">0%</b></div>
           <div class="progress-track"><span id="progressBar"></span></div>
           <p id="progressDetail"></p>
         </section>
-        <p class="profile-status" id="profileStatus" aria-live="polite"></p>
       </section>
 
-      <section class="card form" id="generateCard" hidden>
-        <div class="heading"><h2>2. Cosa deve dire?</h2><p>Incolla il testo che vuoi sentire con la tua voce.</p></div>
+      <section class="card form" id="generateCard">
+        <div class="heading"><h2>Genera una voce</h2><p>Scegli il profilo vocale e scrivi cosa deve dire.</p></div>
+        <label>Voce da usare<select id="voiceSelect"><option value="">Prima salva o scegli una voce…</option></select></label>
         <label>Testo da trasformare in voce<textarea id="text" rows="8" placeholder="Incolla qui il tuo copione..."></textarea><small id="characters">0 caratteri</small></label>
         <div class="two">
           <label>Tetto massimo per questo job (USD)<input id="budget" type="number" min="0.10" step="0.10" value="0.50" /><small>La generazione non parte se la stima supera questo importo.</small></label>
@@ -40,16 +45,12 @@
         </div>
         <details><summary>Impostazioni avanzate</summary><div class="two details"><label>Tariffa GPU massima/ora<input id="rate" type="number" min="0.05" step="0.01" value="0.20" /></label><label>Tempo GPU previsto (minuti)<input id="minutes" type="number" min="5" step="1" value="15" /></label></div></details>
         <label class="check"><input id="destroy" type="checkbox" /> Confermo: distruggi l’istanza e il suo disco alla fine, anche in caso di errore.</label>
-        <button type="button" id="generateButton">Genera con la mia voce</button>
+        <button type="button" id="generateButton">Genera con la voce selezionata</button>
       </section>
 
       <section class="card result" id="result" hidden></section>
-      <section class="card result" id="audioOutput" hidden>
-        <h2>Audio pronto</h2>
-        <audio id="player" controls></audio>
-        <p><a id="downloadAudio" class="download" download="clova-voice.wav">Scarica audio WAV</a></p>
-      </section>
-      <section class="note"><b>Stato:</b> il profilo vocale resta sul tuo PC per questa sessione. Quando la generazione sarà collegata a Vast, campione e testo verranno inviati solo al worker temporaneo e rimossi al termine.</section>
+      <section class="card result" id="audioOutput" hidden><h2>Audio pronto</h2><audio id="player" controls></audio><p><a id="downloadAudio" class="download" download="clova-voice.wav">Scarica audio WAV</a></p></section>
+      <section class="note"><b>Stato:</b> i profili vocali sono salvati localmente nella cartella dell’app, non nel repository e non nel cloud. L’automazione GPU verrà aggiunta al pulsante di generazione.</section>
     </main>
     <script src="/app.js"></script>
   </body>

@@ -1,10 +1,8 @@
 const $ = (id) => document.getElementById(id);
-const reference = $('reference');
 const text = $('text');
-const result = $('result');
-let profileReady = false;
+let voices = [];
 
-function showProgress(title, percent, detail) {
+function progress(title, percent, detail) {
   $('profileProgress').hidden = false;
   $('progressTitle').textContent = title;
   $('progressPercent').textContent = `${percent}%`;
@@ -16,64 +14,94 @@ function updateCharacters() {
   $('characters').textContent = `${text.value.length.toLocaleString('it-IT')} caratteri`;
 }
 
+function bytes(value) {
+  return value < 1024 * 1024 ? `${Math.ceil(value / 1024)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderVoices(selectedId = $('voiceSelect').value) {
+  const list = $('voiceList');
+  const select = $('voiceSelect');
+  select.innerHTML = '<option value="">Scegli una voce salvata…</option>';
+  if (!voices.length) {
+    list.innerHTML = '<p class="muted">Non hai ancora salvato una voce.</p>';
+  } else {
+    list.innerHTML = voices.map((voice) => `<div class="voice-row"><div><b>${escapeHtml(voice.name)}</b><small>Profilo locale · ${bytes(voice.size)}</small></div><button class="delete-voice" data-id="${voice.id}" type="button">Elimina</button></div>`).join('');
+    list.querySelectorAll('.delete-voice').forEach((button) => button.addEventListener('click', () => deleteVoice(button.dataset.id)));
+  }
+  voices.forEach((voice) => {
+    const option = document.createElement('option');
+    option.value = voice.id;
+    option.textContent = voice.name;
+    option.selected = voice.id === selectedId;
+    select.append(option);
+  });
+  $('newVoicePanel').hidden = voices.length >= 3;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
+}
+
+async function loadVoices(selectedId) {
+  const response = await fetch('/api/voices');
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Impossibile leggere le voci salvate.');
+  voices = data.voices;
+  renderVoices(selectedId);
+}
+
+async function deleteVoice(id) {
+  const voice = voices.find((item) => item.id === id);
+  if (!voice || !confirm(`Eliminare definitivamente “${voice.name}” dal PC?`)) return;
+  const response = await fetch(`/api/voices/${id}`, { method: 'DELETE' });
+  if (!response.ok) return alert('Non riesco a eliminare questa voce.');
+  await loadVoices();
+}
+
 text.addEventListener('input', updateCharacters);
 updateCharacters();
 
-reference.addEventListener('change', () => {
-  profileReady = false;
-  $('generateCard').hidden = true;
-  const file = reference.files[0];
-  $('referenceStatus').textContent = file
-    ? `${file.name} selezionato. Ora premi “Crea la mia voce”.`
-    : 'Nessun file selezionato.';
-  if (file) showProgress('Campione selezionato', 10, 'In attesa della creazione del profilo vocale.');
-});
-
-$('cloneButton').addEventListener('click', () => {
-  const file = reference.files[0];
-  const status = $('profileStatus');
-  if (!file) {
-    showProgress('Manca il campione', 0, 'Scegli prima un audio con la tua voce.');
-    status.textContent = 'Prima scegli un file audio della tua voce.';
-    return;
+$('saveVoiceButton').addEventListener('click', async () => {
+  const name = $('voiceName').value.trim();
+  const file = $('reference').files[0];
+  if (!name) return progress('Serve un nome', 0, 'Esempio: Enzo Ufficiale.');
+  if (!file) return progress('Manca il campione', 0, 'Scegli un file audio della voce da salvare.');
+  progress('Salvataggio della voce', 35, 'Il campione viene copiato solo nella cartella locale dell’app.');
+  try {
+    const response = await fetch('/api/voices', {
+      method: 'POST', headers: { 'content-type': file.type, 'x-voice-name': encodeURIComponent(name) }, body: file
+    });
+    const data = await response.json();
+    if (!response.ok) return progress('Impossibile salvare', 0, data.error || 'Errore inatteso.');
+    await loadVoices(data.voice.id);
+    $('voiceName').value = '';
+    $('reference').value = '';
+    progress('Voce salvata', 100, `“${data.voice.name}” è disponibile nel menu “Voce da usare”.`);
+  } catch {
+    progress('Errore di connessione', 0, 'Controlla che START.bat sia attivo, poi riprova.');
   }
-  showProgress('Profilo vocale pronto', 100, 'Campione associato alla sessione. Quando premi “Genera con la mia voce”, il sistema avvierà la trascrizione automatica e la generazione.');
-  profileReady = true;
-  $('generateCard').hidden = false;
-  status.textContent = '✓ La tua voce è pronta per questa sessione. Ora scrivi cosa deve dire.';
-  $('generateCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
 
 $('generateButton').addEventListener('click', async () => {
-  if (!profileReady) return;
-  showProgress('Controllo del job', 15, 'Controllo il budget prima di avviare una GPU.');
-  result.hidden = false;
-  result.innerHTML = '<p>Controllo budget e impostazioni...</p>';
+  const voiceId = $('voiceSelect').value;
+  $('result').hidden = false;
+  $('result').innerHTML = '<p>Controllo budget e impostazioni…</p>';
   const payload = {
-    characters: text.value.length,
-    hourlyRate: Number($('rate').value),
-    minutes: Number($('minutes').value),
-    safetyMinutes: 10,
-    budgetCap: Number($('budget').value),
-    referenceReady: Boolean(reference.files[0]),
-    referenceTranscriptReady: true,
-    confirmDestroy: $('destroy').checked
+    voiceId, text: text.value, language: $('language').value, characters: text.value.length,
+    hourlyRate: Number($('rate').value), minutes: Number($('minutes').value), safetyMinutes: 10,
+    budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked
   };
   try {
-    const response = await fetch('/api/job-plan', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    const response = await fetch('/api/job-plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     const data = await response.json();
     if (!response.ok) {
-      showProgress('Job da correggere', 0, data.error);
-      result.innerHTML = `<h2>Controlla il job</h2><p>${data.error}</p>`;
+      $('result').innerHTML = `<h2>Controlla il job</h2><p>${data.error}</p>`;
       return;
     }
-    showProgress('Piano approvato', 25, 'Il collegamento automatico a Vast deve ancora essere attivato: non è stata noleggiata nessuna GPU.');
-    result.innerHTML = `<h2>Profilo pronto, piano approvato</h2><div class="cost"><b>$${data.cost.estimatedGpuCost}</b><span>stima GPU per ${data.cost.totalMinutes} minuti</span></div><p>La parte che noleggia Vast e restituisce il WAV deve ancora essere collegata. Non è stato avviato alcun addebito.</p>`;
+    $('result').innerHTML = `<h2>Piano approvato</h2><div class="cost"><b>$${data.cost.estimatedGpuCost}</b><span>stima GPU per ${data.cost.totalMinutes} minuti</span></div><p>${data.warning}</p>`;
   } catch {
-    result.innerHTML = '<h2>Server non raggiungibile</h2><p>Chiudi e riapri START.bat, poi ricarica questa pagina.</p>';
+    $('result').innerHTML = '<h2>Server non raggiungibile</h2><p>Chiudi e riapri START.bat, poi ricarica questa pagina.</p>';
   }
 });
+
+loadVoices().catch((error) => { $('voiceList').innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`; });
