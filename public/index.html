@@ -3,43 +3,51 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Clova Voice One-Shot</title>
+    <title>Clova Voice</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main>
       <section class="hero">
-        <span class="pill">GPU solo quando serve</span>
-        <h1>Clova Voice<br /><em>One-Shot</em></h1>
-        <p>Clonazione vocale per i tuoi voice-over. L’app resta sul PC; la GPU cloud viene usata solo per la generazione e deve essere distrutta alla fine.</p>
+        <span class="pill">La tua voce, quando ti serve</span>
+        <h1>Clova <em>Voice</em></h1>
+        <p>Prima prepari la tua voce. Poi incolli qualunque copione e scarichi l’audio generato.</p>
       </section>
 
       <section class="warning">
-        <strong>Regola anti-costi:</strong> su Vast fermare una macchina non basta: il disco puo' continuare a costare. Questo progetto usera' solo istanze temporanee da distruggere automaticamente a fine job.
+        <strong>Solo la tua voce o una voce autorizzata.</strong> La GPU cloud verrà usata soltanto per la generazione e distrutta subito dopo il download.
       </section>
 
-      <section class="card steps">
-        <div><span>01</span><b>Campione vocale</b><small>10-30 secondi puliti con trascrizione esatta.</small></div>
-        <div><span>02</span><b>Testo</b><small>Il testo viene spezzato in blocchi controllabili.</small></div>
-        <div><span>03</span><b>GPU temporanea</b><small>Viene cercata entro il tuo tetto di spesa.</small></div>
-        <div><span>04</span><b>Distruzione</b><small>Output scaricato, istanza eliminata.</small></div>
+      <section class="card form" id="profileCard">
+        <div class="heading"><h2>1. Crea la tua voce</h2><p>Carica un vocale pulito di 10–30 secondi, senza musica o altre persone.</p></div>
+        <label>Il tuo campione vocale<input id="reference" type="file" accept="audio/*" /><small id="referenceStatus">Nessun file selezionato.</small></label>
+        <details>
+          <summary>Che cosa dici nel vocale? <span>(necessario per una clonazione migliore)</span></summary>
+          <label>Testo letto nel campione<textarea id="referenceText" rows="3" placeholder="Incolla le parole che pronunci nel vocale..."></textarea><small>Ad esempio: “Ciao, questa è una registrazione di prova della mia voce.” Non è una descrizione dell’audio, ma il testo realmente pronunciato.</small></label>
+        </details>
+        <button type="button" id="cloneButton">Crea la mia voce</button>
+        <p class="profile-status" id="profileStatus" aria-live="polite"></p>
       </section>
 
-      <form class="card form" id="voiceForm">
-        <div class="heading"><h2>Prepara un job Qwen</h2><p>Questa build controlla il piano di lavoro: non invia file e non crea costi.</p></div>
-        <label>Testo da trasformare in voce<textarea id="text" rows="7" placeholder="Incolla qui il copione...">Benvenuti sul canale. Oggi proviamo una nuova voce sintetica generata in modo controllato.</textarea><small id="characters">0 caratteri</small></label>
-        <label>Trascrizione del campione<textarea id="referenceText" rows="3" placeholder="Scrivi esattamente ciò che dici nell'audio del campione..."></textarea><small>È indispensabile per la clonazione Qwen. Non deve essere una descrizione dell'audio.</small></label>
+      <section class="card form" id="generateCard" hidden>
+        <div class="heading"><h2>2. Cosa deve dire?</h2><p>Incolla il testo che vuoi sentire con la tua voce.</p></div>
+        <label>Testo da trasformare in voce<textarea id="text" rows="8" placeholder="Incolla qui il tuo copione..."></textarea><small id="characters">0 caratteri</small></label>
         <div class="two">
-          <label>Campione della tua voce<input id="reference" type="file" accept="audio/*" /><small id="referenceStatus">Nessun file selezionato.</small></label>
-          <label>Tetto massimo per questo job (USD)<input id="budget" type="number" min="0.10" step="0.10" value="0.50" /><small>Il job si blocca se la stima lo supera.</small></label>
+          <label>Tetto massimo per questo job (USD)<input id="budget" type="number" min="0.10" step="0.10" value="0.50" /><small>La generazione non parte se la stima supera questo importo.</small></label>
+          <label>Lingua<select id="language"><option value="Italian">Italiano</option><option value="English">English</option><option value="Spanish">Español</option><option value="French">Français</option></select><small>Usa la lingua del testo.</small></label>
         </div>
-        <details><summary>Stima e impostazioni avanzate</summary><div class="two details"><label>Tariffa GPU massima/ora<input id="rate" type="number" min="0.05" step="0.01" value="0.20" /></label><label>Tempo GPU previsto (minuti)<input id="minutes" type="number" min="5" step="1" value="15" /></label></div></details>
+        <details><summary>Impostazioni avanzate</summary><div class="two details"><label>Tariffa GPU massima/ora<input id="rate" type="number" min="0.05" step="0.01" value="0.20" /></label><label>Tempo GPU previsto (minuti)<input id="minutes" type="number" min="5" step="1" value="15" /></label></div></details>
         <label class="check"><input id="destroy" type="checkbox" /> Confermo: distruggi l’istanza e il suo disco alla fine, anche in caso di errore.</label>
-        <button type="submit">Controlla piano e costo</button>
-      </form>
+        <button type="button" id="generateButton">Genera con la mia voce</button>
+      </section>
 
       <section class="card result" id="result" hidden></section>
-      <section class="note"><b>Stato della build:</b> pianificatore locale pronto. Il motore sarà Qwen3-TTS Base 1.7B; il prossimo modulo collegherà il token Vast AI e il worker privato, mantenendo la chiave solo in memoria e richiedendo conferma prima di qualsiasi addebito.</section>
+      <section class="card result" id="audioOutput" hidden>
+        <h2>Audio pronto</h2>
+        <audio id="player" controls></audio>
+        <p><a id="downloadAudio" class="download" download="clova-voice.wav">Scarica audio WAV</a></p>
+      </section>
+      <section class="note"><b>Stato:</b> il profilo vocale resta sul tuo PC per questa sessione. Quando la generazione sarà collegata a Vast, campione e testo verranno inviati solo al worker temporaneo e rimossi al termine.</section>
     </main>
     <script src="/app.js"></script>
   </body>
