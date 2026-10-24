@@ -9,13 +9,16 @@ from pathlib import Path
 
 import soundfile as sf
 import torch
+from faster_whisper import WhisperModel
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from qwen_tts import Qwen3TTSModel
 
 app = FastAPI(title="Clova Voice Qwen worker", docs_url=None, redoc_url=None)
 MODEL: Qwen3TTSModel | None = None
+TRANSCRIBER: WhisperModel | None = None
 MODEL_PATH = os.getenv("QWEN_MODEL_PATH", "/models/qwen3-tts-1.7b-base")
+WHISPER_MODEL_PATH = os.getenv("WHISPER_MODEL_PATH", "/models/faster-whisper-small")
 JOB_TOKEN = os.getenv("CLOVA_JOB_TOKEN", "")
 MAX_TEXT_CHARS = 2_000
 
@@ -37,6 +40,29 @@ def get_model() -> Qwen3TTSModel:
             MODEL_PATH, device_map="cuda:0", dtype=torch.bfloat16
         )
     return MODEL
+
+
+def get_transcriber() -> WhisperModel:
+    global TRANSCRIBER
+    if TRANSCRIBER is None:
+        if not torch.cuda.is_available():
+            raise RuntimeError("GPU CUDA non disponibile")
+        TRANSCRIBER = WhisperModel(
+            WHISPER_MODEL_PATH, device="cuda", compute_type="float16"
+        )
+    return TRANSCRIBER
+
+
+def transcribe_reference(path: Path, language: str) -> str:
+    """Get the words actually spoken in the reference audio for Qwen."""
+    language_code = {"Italian": "it", "English": "en", "Spanish": "es", "French": "fr"}.get(language)
+    segments, _ = get_transcriber().transcribe(
+        str(path), language=language_code, vad_filter=True, beam_size=5
+    )
+    transcription = " ".join(segment.text.strip() for segment in segments).strip()
+    if not transcription:
+        raise RuntimeError("Non riesco a capire il campione vocale. Prova con un audio più pulito.")
+    return transcription
 
 
 @app.get("/health")
@@ -68,15 +94,15 @@ def remove_paths(*paths: Path) -> None:
 async def generate(
     background_tasks: BackgroundTasks,
     reference: UploadFile = File(...),
-    reference_text: str = Form(...),
+    reference_text: str = Form(""),
     text: str = Form(...),
     language: str = Form("Italian"),
     authorization: str | None = Header(default=None),
 ) -> FileResponse:
     require_token(authorization)
     text, reference_text = text.strip(), reference_text.strip()
-    if not text or not reference_text:
-        raise HTTPException(status_code=422, detail="Servono testo e trascrizione esatta del campione")
+    if not text:
+        raise HTTPException(status_code=422, detail="Serve il testo da generare")
     if len(text) > MAX_TEXT_CHARS:
         raise HTTPException(status_code=422, detail=f"Testo troppo lungo (massimo {MAX_TEXT_CHARS} caratteri)")
     if not (reference.content_type or "").startswith("audio/"):
@@ -90,6 +116,8 @@ async def generate(
         with source.open("wb") as destination:
             while chunk := await reference.read(1024 * 1024):
                 destination.write(chunk)
+        if not reference_text:
+            reference_text = transcribe_reference(source, language)
         wavs, sample_rate = get_model().generate_voice_clone(
             text=text, language=language, ref_audio=str(source), ref_text=reference_text
         )

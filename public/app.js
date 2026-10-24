@@ -22,14 +22,9 @@ reference.addEventListener('change', () => {
 
 $('cloneButton').addEventListener('click', () => {
   const file = reference.files[0];
-  const spokenText = $('referenceText').value.trim();
   const status = $('profileStatus');
   if (!file) {
     status.textContent = 'Prima scegli un file audio della tua voce.';
-    return;
-  }
-  if (!spokenText) {
-    status.textContent = 'Apri “Che cosa dici nel vocale?” e incolla le parole che hai realmente pronunciato. Serve a Qwen per clonare bene la voce.';
     return;
   }
   profileReady = true;
@@ -49,7 +44,7 @@ $('generateButton').addEventListener('click', async () => {
     safetyMinutes: 10,
     budgetCap: Number($('budget').value),
     referenceReady: Boolean(reference.files[0]),
-    referenceTranscriptReady: Boolean($('referenceText').value.trim()),
+    referenceTranscriptReady: true,
     confirmDestroy: $('destroy').checked
   };
   try {

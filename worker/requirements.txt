@@ -3,3 +3,4 @@ python-multipart
 uvicorn[standard]
 soundfile
 qwen-tts
+faster-whisper

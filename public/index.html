@@ -21,10 +21,7 @@
       <section class="card form" id="profileCard">
         <div class="heading"><h2>1. Crea la tua voce</h2><p>Carica un vocale pulito di 10–30 secondi, senza musica o altre persone.</p></div>
         <label>Il tuo campione vocale<input id="reference" type="file" accept="audio/*" /><small id="referenceStatus">Nessun file selezionato.</small></label>
-        <details>
-          <summary>Che cosa dici nel vocale? <span>(necessario per una clonazione migliore)</span></summary>
-          <label>Testo letto nel campione<textarea id="referenceText" rows="3" placeholder="Incolla le parole che pronunci nel vocale..."></textarea><small>Ad esempio: “Ciao, questa è una registrazione di prova della mia voce.” Non è una descrizione dell’audio, ma il testo realmente pronunciato.</small></label>
-        </details>
+        <p class="helper">La trascrizione del campione viene estratta automaticamente in locale sul worker: non devi scrivere ciò che dici nel vocale.</p>
         <button type="button" id="cloneButton">Crea la mia voce</button>
         <p class="profile-status" id="profileStatus" aria-live="polite"></p>
       </section>
