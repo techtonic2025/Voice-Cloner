@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
 import secrets
 import tempfile
 import threading
 import time
+import unicodedata
 import zipfile
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
@@ -125,34 +128,70 @@ def prepare_reference(source: Path, language: str, folder: Path) -> tuple[Path, 
 
 
 def split_text(text: str, limit: int = CHUNK_CHARS) -> list[str]:
-    """Split on sentence boundaries, then on commas, so each chunk stays short."""
-    sentences = re.split(r"(?<=[.!?…;:])\s+|\n{2,}", re.sub(r"[ \t]+", " ", text.strip()))
+    """Split into chunks of whole sentences that never cross a paragraph, so each
+    chunk keeps one coherent intonation; overlong sentences fall back to commas."""
     chunks: list[str] = []
-    current = ""
-    for sentence in (s.strip() for s in sentences):
-        if not sentence:
-            continue
-        pieces = [sentence]
-        if len(sentence) > limit:
-            pieces = [p.strip() for p in re.split(r"(?<=[,])\s+", sentence) if p.strip()]
-        for piece in pieces:
-            while len(piece) > limit:
-                cut = piece.rfind(" ", 0, limit)
-                cut = cut if cut > limit // 2 else limit
-                chunks.append(piece[:cut].strip())
-                piece = piece[cut:].strip()
-            if current and len(current) + 1 + len(piece) > limit:
-                chunks.append(current)
-                current = piece
-            else:
-                current = f"{current} {piece}".strip()
-    if current:
-        chunks.append(current)
+    for paragraph in re.split(r"\n\s*\n", text.strip()):
+        paragraph = re.sub(r"\s+", " ", paragraph).strip()
+        current = ""
+        for sentence in re.split(r"(?<=[.!?…;:])\s+", paragraph):
+            if not sentence:
+                continue
+            pieces = [sentence]
+            if len(sentence) > limit:
+                pieces = [p.strip() for p in re.split(r"(?<=[,])\s+", sentence) if p.strip()]
+            for piece in pieces:
+                while len(piece) > limit:
+                    cut = piece.rfind(" ", 0, limit)
+                    cut = cut if cut > limit // 2 else limit
+                    chunks.append(piece[:cut].strip())
+                    piece = piece[cut:].strip()
+                if current and len(current) + 1 + len(piece) > limit:
+                    chunks.append(current)
+                    current = piece
+                else:
+                    current = f"{current} {piece}".strip()
+        if current:
+            chunks.append(current)
     return chunks
 
 
+def apply_pronunciations(text: str, entries: list[list[str]]) -> str:
+    """Respell foreign words as they sound ("file" -> "fàil"), whole words only,
+    keeping a leading capital. Takes are still checked against the original text,
+    because Whisper writes a well-pronounced "browser" as "browser"."""
+    for word, spoken in sorted(entries, key=lambda entry: -len(entry[0])):
+        def replace(match: re.Match) -> str:
+            return spoken[:1].upper() + spoken[1:] if match.group(0)[:1].isupper() else spoken
+        text = re.sub(rf"(?<!\w){re.escape(word)}(?!\w)", replace, text, flags=re.IGNORECASE)
+    return text
+
+
+def normalize_words(value: str) -> str:
+    """Lowercase, drop accents and punctuation: "Bràuser!" and "brauser" compare equal."""
+    value = unicodedata.normalize("NFD", value.lower())
+    value = "".join(c for c in value if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value).split())
+
+
+def take_score(wav: np.ndarray, sample_rate: int, target: str, language: str) -> float:
+    """How faithfully a take says the target text, judged by Whisper (0..1)."""
+    length = int(len(wav) * 16_000 / sample_rate)
+    audio16 = np.interp(np.linspace(0, len(wav) - 1, length), np.arange(len(wav)), wav).astype("float32")
+    segments, _ = TRANSCRIBER.transcribe(
+        audio16, language=LANGUAGE_CODES.get(language), beam_size=1,
+        vad_filter=False, condition_on_previous_text=False,
+    )
+    heard = " ".join(segment.text for segment in segments)
+    score = SequenceMatcher(None, normalize_words(target), normalize_words(heard)).ratio()
+    # Runaway takes (babbling, long silences) run far longer than ~15 characters per second.
+    if len(wav) / sample_rate > max(4.0, len(target) / 15 * 2.2):
+        score *= 0.8
+    return score
+
+
 def run_job(job_id: str, source: Path, reference_text: str, text: str, language: str, pause: float,
-            temperature: float) -> None:
+            temperature: float, top_p: float, takes: int, pronunciations: list[list[str]]) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     try:
@@ -173,18 +212,42 @@ def run_job(job_id: str, source: Path, reference_text: str, text: str, language:
                 PROMPTS[key] = prompt
 
             chunks = split_text(text)
-            job.update(status="generating", total=len(chunks), done=0)
-            parts: list[np.ndarray] = []
-            sampling = {"do_sample": True, "temperature": temperature} if temperature > 0 else {}
+            spoken = [apply_pronunciations(chunk, pronunciations) for chunk in chunks]
+            job.update(status="generating", total=len(chunks), done=0, takes=takes)
+            sampling: dict[str, object] = {}
+            if temperature > 0:
+                sampling.update(do_sample=True, temperature=temperature)
+            if 0 < top_p < 1:
+                sampling["top_p"] = top_p
+            # With several takes per chunk, each copy is sampled independently in the
+            # same batch and Whisper keeps the one that best matches the text.
+            items = [index for index in range(len(chunks)) for _ in range(takes)]
+            candidates: list[list[np.ndarray]] = [[] for _ in chunks]
             sample_rate = 24_000
-            for offset in range(0, len(chunks), BATCH_SIZE):
-                batch = chunks[offset:offset + BATCH_SIZE]
+            for offset in range(0, len(items), BATCH_SIZE):
+                batch = items[offset:offset + BATCH_SIZE]
                 wavs, sample_rate = MODEL.generate_voice_clone(
-                    text=batch, language=[language] * len(batch), voice_clone_prompt=prompt,
-                    max_new_tokens=2048, **sampling,
+                    text=[spoken[i] for i in batch], language=[language] * len(batch),
+                    voice_clone_prompt=prompt, max_new_tokens=2048, **sampling,
                 )
-                parts.extend(np.asarray(w, dtype="float32").reshape(-1) for w in wavs)
-                job["done"] = len(parts)
+                for index, wav in zip(batch, wavs):
+                    candidates[index].append(np.asarray(wav, dtype="float32").reshape(-1))
+                job["done"] = sum(len(c) == takes for c in candidates)
+
+            parts: list[np.ndarray] = []
+            scores: list[float] = []
+            for chunk, options in zip(chunks, candidates):
+                if takes == 1:
+                    parts.append(options[0])
+                    continue
+                job["status"] = "checking"
+                ranked = [(take_score(wav, sample_rate, chunk, language), wav) for wav in options]
+                best_score, best = max(ranked, key=lambda pair: pair[0])
+                parts.append(best)
+                scores.append(round(best_score, 3))
+            if scores:
+                job["quality"] = round(sum(scores) / len(scores), 3)
+                job["weakest"] = [i + 1 for i, value in enumerate(scores) if value < 0.85]
 
         job["status"] = "packing"
         silence = np.zeros(int(sample_rate * pause), dtype="float32")
@@ -227,9 +290,16 @@ async def create_job(
     language: str = Form("Italian"),
     pause: float = Form(0.35),
     temperature: float = Form(0.0),
+    top_p: float = Form(0.0),
+    takes: int = Form(1),
+    pronunciations: str = Form("[]"),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
+    try:
+        entries = [[str(word), str(said)] for word, said in json.loads(pronunciations) if str(word).strip() and str(said).strip()]
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="Dizionario di pronuncia non valido") from None
     if MODEL is None:
         raise HTTPException(status_code=503, detail=LOAD_ERROR or "Modello non ancora caricato")
     text, reference_text = text.strip(), reference_text.strip()
@@ -250,7 +320,8 @@ async def create_job(
     JOBS[job_id] = {"status": "queued", "done": 0, "total": 0, "started": time.time()}
     threading.Thread(
         target=run_job,
-        args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5)),
+        args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5),
+              min(max(top_p, 0), 1), min(max(takes, 1), 3), entries),
         daemon=True,
     ).start()
     return {"id": job_id}

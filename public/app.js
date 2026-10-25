@@ -135,7 +135,7 @@ $('generateButton').addEventListener('click', async () => {
     hourlyRate: Number($('rate').value), minutes: Number($('minutes').value), safetyMinutes: 10,
     budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked, pause: Number($('pause').value),
     keepAlive: document.querySelector('input[name="lifecycle"]:checked').value === 'keep',
-    stable: $('stable').checked
+    stability: $('stability').value, quality: $('quality').value
   };
   try {
     const response = await fetch('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
@@ -152,7 +152,8 @@ $('generateButton').addEventListener('click', async () => {
       $('player').src = job.files.full;
       $('downloadAudio').href = `${job.files.full}?download`;
       $('downloadParts').href = `${job.files.parts}?download`;
-      $('outputInfo').textContent = `${job.chunks} blocchi · ${job.audioSeconds} secondi di audio · costo GPU stimato $${job.cost}`;
+      const check = job.quality ? ` · fedeltà al testo ${Math.round(job.quality * 100)}%${job.weakest?.length ? ` (da riascoltare: blocchi ${job.weakest.join(', ')})` : ''}` : '';
+      $('outputInfo').textContent = `${job.chunks} blocchi · ${job.audioSeconds} secondi di audio · costo GPU stimato $${job.cost}${check}`;
       $('audioOutput').hidden = false;
       await loadVoices(voiceId);
     }

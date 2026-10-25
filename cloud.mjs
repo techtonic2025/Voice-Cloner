@@ -15,6 +15,8 @@ const LOAD_TIMEOUT_MS = 10 * 60_000;
 const KEEP_ALIVE_MS = Number(process.env.CLOVA_KEEP_ALIVE_MS) || 5 * 60_000;
 // Bump when the worker changes how it prepares the reference, so old clips are redone.
 const CLIP_VERSION = 2;
+// Sampling presets sent to the worker; "natural" keeps the model defaults (temperature 0.9, top_p 1).
+const STABILITY = { stable: { temperature: 0.6, topP: 0.9 }, very: { temperature: 0.4, topP: 0.8 } };
 
 export function createCloud({ root, voicesDir }) {
   const outputsDir = join(root, 'outputs');
@@ -171,7 +173,7 @@ export function createCloud({ root, voicesDir }) {
     return null;
   }
 
-  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive, stable }) {
+  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive, stability, takes, pronunciations }) {
     if (running) throw new Error('C’è già una generazione in corso. Attendi o annullala.');
     const job = {
       id: randomUUID(), status: 'searching', percent: 2, detail: 'Cerco una GPU adatta…',
@@ -184,7 +186,7 @@ export function createCloud({ root, voicesDir }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    run(job, controller.signal, { voice, text, language, maxRate, pause, keepAlive, stable })
+    run(job, controller.signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations })
       .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
       .finally(() => { clearTimeout(watchdog); running = null; });
     return job;
@@ -274,7 +276,7 @@ export function createCloud({ root, voicesDir }) {
     return current;
   }
 
-  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive, stable }) {
+  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
     let current = null;
     let success = false;
@@ -305,8 +307,11 @@ export function createCloud({ root, voicesDir }) {
       form.append('text', text);
       form.append('language', language);
       form.append('pause', String(pause));
-      // Lower sampling temperature: fewer slips like doubled consonants, flatter intonation.
-      if (stable) form.append('temperature', '0.6');
+      // Lower sampling temperature/top_p: fewer slips like doubled consonants, flatter intonation.
+      const sampling = STABILITY[stability];
+      if (sampling) { form.append('temperature', String(sampling.temperature)); form.append('top_p', String(sampling.topP)); }
+      form.append('takes', String(takes));
+      form.append('pronunciations', JSON.stringify(pronunciations || []));
       const submitted = await worker('/jobs', { method: 'POST', body: form });
       const submittedData = await submitted.json();
       if (!submitted.ok) throw new Error(submittedData.detail || 'Il worker ha rifiutato il lavoro.');
@@ -321,6 +326,8 @@ export function createCloud({ root, voicesDir }) {
         if (remote.status === 'done') break;
         if (remote.status === 'generating' && remote.total) {
           set('generating', 50 + Math.round((remote.done / remote.total) * 40), `Sintesi con la tua voce: blocco ${remote.done} di ${remote.total}`);
+        } else if (remote.status === 'checking') {
+          set('generating', 91, `Whisper ascolta i ${remote.takes} tentativi di ogni blocco e sceglie i migliori…`);
         } else {
           set('generating', 50, remote.status === 'preparing' ? 'Preparo il campione completo e lo trascrivo (solo la prima volta)…' : 'In coda…');
         }
@@ -344,7 +351,7 @@ export function createCloud({ root, voicesDir }) {
         await writeFile(profilePath, JSON.stringify({ ...profile, clipFilename: 'reference-clip.wav', referenceText: remote.reference_text, clipVersion: CLIP_VERSION }, null, 2));
       }
       updateCost();
-      Object.assign(job, { files: { full: `/api/jobs/${job.id}/files/clova-voice.wav`, parts: `/api/jobs/${job.id}/files/clova-voice-blocchi.zip` }, chunks: remote.total, audioSeconds: remote.seconds });
+      Object.assign(job, { files: { full: `/api/jobs/${job.id}/files/clova-voice.wav`, parts: `/api/jobs/${job.id}/files/clova-voice-blocchi.zip` }, chunks: remote.total, audioSeconds: remote.seconds, quality: remote.quality, weakest: remote.weakest });
       success = true;
     } finally {
       if (current && session === current) {
