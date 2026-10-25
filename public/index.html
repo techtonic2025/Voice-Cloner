@@ -19,7 +19,7 @@
       <section class="hero">
         <span class="pill">Le tue voci, sul tuo PC</span>
         <h1>Clova <em>Voice</em></h1>
-        <p>Salva fino a tre profili vocali. Scegline uno, incolla un testo e genera il tuo voice-over.</p>
+        <p>Clona la tua voce da un campione o addestrala sulle tue registrazioni. Scegli la voce, incolla un testo e genera il tuo voice-over.</p>
       </section>
 
       <section class="warning"><strong>Solo la tua voce o una voce autorizzata.</strong> I campioni restano salvati sul tuo PC. La GPU temporanea verrà distrutta al termine del lavoro.</section>
@@ -40,6 +40,30 @@
           <div class="progress-heading"><strong id="progressTitle">Preparazione</strong><b id="progressPercent">0%</b></div>
           <div class="progress-track"><span id="progressBar"></span></div>
           <p id="progressDetail"></p>
+        </section>
+      </section>
+
+      <section class="card form" id="trainCard">
+        <div class="heading"><h2>Addestra la tua voce</h2><p>Come il “Professional Voice Cloning”: da 30–60 minuti di registrazioni vere il modello impara come parli tu, accento compreso. Si fa una volta sola.</p></div>
+        <h3>1. Token Hugging Face</h3>
+        <p class="helper">Il modello addestrato viene salvato in un tuo repository <b>privato</b> su Hugging Face. Crea un token con permesso <b>Write</b> su huggingface.co → Settings → Access Tokens. Resta salvato solo su questo PC.</p>
+        <div class="actions"><input id="hfToken" class="token-input" type="password" autocomplete="off" placeholder="hf_…" /><button type="button" id="saveHf" class="ghost">Salva token</button></div>
+        <p class="muted" id="hfStatus"></p>
+        <h3>2. Registrazioni della tua voce</h3>
+        <p class="helper">Solo registrazioni <b>vere</b>, parlato pulito senza musica: niente audio già generati con l’IA.</p>
+        <div class="voice-list" id="trainingFiles"><p class="muted">Caricamento…</p></div>
+        <label>Aggiungi registrazioni<input id="trainingUpload" type="file" multiple accept=".mp3,.wav,.m4a,.ogg,.flac,audio/*" /></label>
+        <h3>3. Avvia</h3>
+        <div class="two">
+          <label>Nome della voce addestrata<input id="trainedName" type="text" maxlength="40" value="TechTonic" /></label>
+          <label>Epoche di addestramento<select id="epochs"><option value="2">2 (più veloce)</option><option value="3" selected>3 (consigliato)</option><option value="5">5 (più aderente, rischio di “imparare a memoria”)</option></select></label>
+        </div>
+        <p class="helper">Serve una GPU da almeno 40 GB (tariffa massima 1 $/ora). Stima: 30–90 minuti, circa 0,50–1,50 $. La GPU viene distrutta alla fine, anche in caso di errore.</p>
+        <div class="actions"><button type="button" id="startTraining">Avvia addestramento</button><button type="button" id="cancelTraining" class="secondary" hidden>Annulla e distruggi la GPU</button></div>
+        <section class="progress-panel" id="trainProgress" hidden aria-live="polite">
+          <div class="progress-heading"><strong id="trainTitle">Preparazione</strong><b id="trainPercent">0%</b></div>
+          <div class="progress-track"><span id="trainBar"></span></div>
+          <p id="trainDetail"></p>
         </section>
       </section>
 

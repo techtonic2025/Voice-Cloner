@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const text = $('text');
 let voices = [];
+let voiceLimit = 5;
 
 function progress(title, percent, detail) {
   $('profileProgress').hidden = false;
@@ -25,7 +26,7 @@ function renderVoices(selectedId = $('voiceSelect').value) {
   if (!voices.length) {
     list.innerHTML = '<p class="muted">Non hai ancora salvato una voce.</p>';
   } else {
-    list.innerHTML = voices.map((voice) => `<div class="voice-row"><div><b>${escapeHtml(voice.name)}</b><small>Profilo locale · ${bytes(voice.size)}${voice.prepared ? ' · campione ottimizzato' : ' · verrà ottimizzato alla prima generazione'}</small></div><div class="actions">${voice.prepared ? `<button class="ghost transcript-voice" data-id="${voice.id}" type="button">Trascrizione</button>` : ''}<button class="delete-voice" data-id="${voice.id}" type="button">Elimina</button></div></div>
+    list.innerHTML = voices.map((voice) => `<div class="voice-row${voice.type === 'trained' ? ' trained' : ''}"><div><b>${escapeHtml(voice.name)}</b><small>${voice.type === 'trained' ? 'Modello addestrato sulla tua voce · salvato su Hugging Face (privato)' : `Voce clonata · ${bytes(voice.size)}${voice.prepared ? ' · campione ottimizzato' : ' · verrà ottimizzato alla prima generazione'}`}</small></div><div class="actions">${voice.prepared ? `<button class="ghost transcript-voice" data-id="${voice.id}" type="button">Trascrizione</button>` : ''}<button class="delete-voice" data-id="${voice.id}" type="button">Elimina</button></div></div>
       <div class="transcript-panel" id="transcript-${voice.id}" hidden>
         <p class="helper">Questo è il testo che Qwen abbina al tuo campione. Deve corrispondere <b>parola per parola</b> a ciò che dici nella registrazione: correggi eventuali errori di Whisper.</p>
         <textarea rows="7"></textarea>
@@ -42,7 +43,7 @@ function renderVoices(selectedId = $('voiceSelect').value) {
     option.selected = voice.id === selectedId;
     select.append(option);
   });
-  $('newVoicePanel').hidden = voices.length >= 3;
+  $('newVoicePanel').hidden = voices.length >= voiceLimit;
 }
 
 async function toggleTranscript(id) {
@@ -75,6 +76,7 @@ async function loadVoices(selectedId) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Impossibile leggere le voci salvate.');
   voices = data.voices;
+  voiceLimit = data.limit || voiceLimit;
   renderVoices(selectedId);
 }
 
@@ -326,5 +328,91 @@ window.addEventListener('beforeunload', (event) => {
 pollInstance();
 setInterval(pollInstance, 3000);
 setInterval(renderInstance, 1000);
+
+// Fine-tuning: Hugging Face token, recordings and the training job.
+async function loadHf() {
+  const data = await (await fetch('/api/hf')).json();
+  $('hfStatus').textContent = !data.configured ? 'Nessun token salvato.'
+    : data.canWrite ? `Token salvato: utente ${data.user}, permesso di scrittura ✓` : `Token salvato (utente ${data.user}) ma senza permesso di scrittura: creane uno “Write”.`;
+}
+
+$('saveHf').addEventListener('click', async () => {
+  $('hfStatus').textContent = 'Verifica del token…';
+  const response = await fetch('/api/hf', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: $('hfToken').value }) });
+  const data = await response.json();
+  $('hfToken').value = '';
+  if (!response.ok) $('hfStatus').textContent = data.error;
+  else loadHf();
+});
+
+function renderTrainingFiles(files) {
+  const list = $('trainingFiles');
+  if (!files.length) {
+    list.innerHTML = '<p class="muted">Nessuna registrazione: aggiungine almeno una (meglio 30–60 minuti in tutto).</p>';
+    return;
+  }
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  list.innerHTML = files.map((file) => `<div class="voice-row"><div><b>${escapeHtml(file.name)}</b><small>${bytes(file.size)}</small></div><button class="delete-training" data-name="${escapeHtml(file.name)}" type="button">Rimuovi</button></div>`).join('')
+    + `<p class="muted">${files.length} file · ${bytes(total)} in tutto</p>`;
+  list.querySelectorAll('.delete-training').forEach((button) => button.addEventListener('click', async () => {
+    if (!confirm(`Rimuovere “${button.dataset.name}” dalle registrazioni di addestramento?`)) return;
+    renderTrainingFiles((await (await fetch(`/api/training/files/${encodeURIComponent(button.dataset.name)}`, { method: 'DELETE' })).json()).files);
+  }));
+}
+
+async function loadTrainingFiles() {
+  renderTrainingFiles((await (await fetch('/api/training/files')).json()).files);
+}
+
+$('trainingUpload').addEventListener('change', async () => {
+  for (const file of $('trainingUpload').files) {
+    $('trainingFiles').insertAdjacentHTML('beforeend', `<p class="muted">Copia di ${escapeHtml(file.name)}…</p>`);
+    const response = await fetch('/api/training/files', { method: 'POST', headers: { 'x-file-name': encodeURIComponent(file.name) }, body: file });
+    const data = await response.json();
+    if (!response.ok) alert(data.error);
+    else renderTrainingFiles(data.files);
+  }
+  $('trainingUpload').value = '';
+});
+
+const trainTitles = { searching: 'Ricerca GPU', creating: 'Noleggio GPU', booting: 'Avvio GPU', loading: 'Caricamento modello', uploading: 'Invio registrazioni', training: 'Addestramento', destroying: 'Distruzione GPU', done: 'Completato', error: 'Errore' };
+let trainingJob = null;
+
+$('startTraining').addEventListener('click', async () => {
+  if (!confirm('Avviare l’addestramento? Verrà noleggiata una GPU da almeno 40 GB per 30–90 minuti (circa 0,50–1,50 $), poi distrutta.')) return;
+  const response = await fetch('/api/training/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ voiceName: $('trainedName').value, epochs: Number($('epochs').value) }) });
+  const data = await response.json();
+  if (!response.ok) return alert(data.error);
+  trainingJob = data.id;
+  $('startTraining').disabled = true;
+  $('cancelTraining').hidden = false;
+  $('trainProgress').hidden = false;
+  try {
+    for (;;) {
+      const { job } = await (await fetch(`/api/jobs/${trainingJob}`)).json();
+      $('trainTitle').textContent = trainTitles[job.status] || job.status;
+      $('trainPercent').textContent = `${Math.round(job.percent)}%`;
+      $('trainBar').style.width = `${job.percent}%`;
+      const extra = [job.gpu, job.clips ? `${job.clips} frasi (${job.minutes} min)` : null, job.rate ? `spesa $${job.cost.toFixed(3)}` : null].filter(Boolean).join(' · ');
+      $('trainDetail').textContent = (job.status === 'error' ? `${job.error}${job.instanceId ? (job.destroyed ? ' · GPU distrutta.' : ' · controlla cloud.vast.ai.') : ''}` : job.detail) + (extra ? ` · ${extra}` : '');
+      if (job.status === 'done' || job.status === 'error') break;
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+    }
+    await loadVoices();
+  } finally {
+    trainingJob = null;
+    $('startTraining').disabled = false;
+    $('cancelTraining').hidden = true;
+  }
+});
+
+$('cancelTraining').addEventListener('click', async () => {
+  if (trainingJob && confirm('Annullare l’addestramento? La GPU verrà distrutta e il lavoro fatto finora andrà perso.')) {
+    await fetch(`/api/jobs/${trainingJob}/cancel`, { method: 'POST' });
+  }
+});
+
+loadHf().catch(() => {});
+loadTrainingFiles().catch(() => {});
 
 loadVoices().catch((error) => { $('voiceList').innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`; });

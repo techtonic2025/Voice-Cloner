@@ -155,6 +155,10 @@ code { font: 13px ui-monospace, Consolas, monospace; color: #ffb27a; background:
 .note { padding: 18px 22px; font-size: 14px; color: var(--muted); margin-top: 6px; }
 .note b { color: #e8e1d9; }
 
+.token-input { flex: 1; min-width: 220px; padding: 11px 14px; font: 14px ui-monospace, Consolas, monospace; color: var(--ink); background: rgba(0, 0, 0, .35); border: 1px solid var(--line-strong); border-radius: 12px; }
+.token-input:focus { outline: none; border-color: var(--orange); box-shadow: 0 0 0 4px rgba(255, 122, 26, .16); }
+.voice-row.trained { border-color: rgba(255, 122, 26, .35); }
+
 /* History */
 .history-list { display: grid; gap: 12px; margin-top: 18px; }
 .history-item { padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--glass-soft); transition: border-color .2s; }

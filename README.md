@@ -29,6 +29,26 @@ Variabili opzionali:
 - `CLOVA_IMAGE_LOGIN`: credenziali registro per Vast se l'immagine è privata,
   es. `-u utente -p TOKEN ghcr.io`.
 
+## Voce addestrata (fine-tuning)
+
+Come il "Professional Voice Cloning": da 30–60 minuti di registrazioni **vere**
+(niente audio già generati con l'IA) il modello Qwen3-TTS 1.7B impara come parli,
+accento compreso.
+
+1. Crea su Hugging Face un token con permesso **Write** e salvalo nel riquadro
+   "Addestra la tua voce" (resta in `data/hf.json`, escluso da git).
+2. Aggiungi le registrazioni (finiscono in `data/training/`).
+3. Premi "Avvia addestramento": su una GPU da almeno 40 GB Whisper taglia le
+   registrazioni in frasi da 3–12 s (scarta quelle incerte), gli script ufficiali
+   di `QwenLM/Qwen3-TTS/finetuning` calcolano i codici audio e addestrano, e il
+   modello viene caricato in un repository **privato** `utente/clova-voice-<nome>`.
+   Poi la GPU viene distrutta.
+4. Compare la voce addestrata: le GPU la scaricano da Hugging Face e non serve più
+   inviare un campione.
+
+Il token Hugging Face viene passato alla GPU noleggiata (variabile `HF_TOKEN`)
+per scaricare e caricare il modello privato.
+
 ## Velocità
 
 - Alla prima generazione il worker usa tutto il campione (fino a 2 minuti, tolti

@@ -11,10 +11,12 @@ const PORT = Number(process.env.PORT || 4173);
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(ROOT, 'public');
 const VOICES = join(ROOT, 'data', 'voices');
-const MAX_VOICES = 3;
+const MAX_VOICES = 5;
 const MAX_AUDIO_BYTES = 75 * 1024 * 1024;
 const MAX_TEXT_CHARS = 60_000;
-const cloud = createCloud({ root: ROOT, voicesDir: VOICES });
+const HF_SETTINGS = join(ROOT, 'data', 'hf.json');
+const TRAINING = join(ROOT, 'data', 'training');
+const cloud = createCloud({ root: ROOT, voicesDir: VOICES, getHfToken: async () => (await readHf()).token || '' });
 
 const mime = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -65,7 +67,7 @@ async function listVoices() {
     if (!entry.isDirectory() || !safeId(entry.name)) continue;
     try {
       const meta = JSON.parse(await readFile(join(VOICES, entry.name, 'profile.json'), 'utf8'));
-      voices.push({ id: entry.name, name: meta.name, createdAt: meta.createdAt, size: meta.size, prepared: Boolean(meta.referenceText) });
+      voices.push({ id: entry.name, name: meta.name, createdAt: meta.createdAt, size: meta.size, type: meta.type || 'clone', prepared: Boolean(meta.referenceText) });
     } catch { /* Ignore incomplete profiles. */ }
   }
   return voices.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -157,6 +159,39 @@ async function listHistory() {
   return items.filter(Boolean).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+// Hugging Face token: stored only in data/ (git-ignored), never sent back to the page.
+async function readHf() {
+  // Tolerates a BOM, e.g. if the file was edited with Notepad.
+  try { return JSON.parse((await readFile(HF_SETTINGS, 'utf8')).replace(/^﻿/, '')); } catch { return {}; }
+}
+
+async function checkHfToken(token) {
+  const response = await fetch('https://huggingface.co/api/whoami-v2', { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
+  if (!response.ok) throw new Error('Token Hugging Face non valido.');
+  const data = await response.json();
+  const access = data.auth?.accessToken || {};
+  const scoped = (access.fineGrained?.scoped || []).flatMap((entry) => entry.permissions || []);
+  // Classic tokens have a role; fine-grained ones list scoped permissions instead.
+  const canWrite = ['write', 'admin'].includes(access.role) || scoped.includes('repo.write');
+  return { user: data.name, role: access.role || 'unknown', canWrite };
+}
+
+async function listTrainingFiles() {
+  await mkdir(TRAINING, { recursive: true });
+  const entries = await readdir(TRAINING, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.(mp3|wav|m4a|ogg|flac)$/i.test(entry.name)) continue;
+    files.push({ name: entry.name, size: (await stat(join(TRAINING, entry.name))).size });
+  }
+  return files.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function safeFileName(value) {
+  const name = String(value || '').replace(/[^\p{L}\p{N} ._-]/gu, '_').trim().slice(0, 120);
+  return name && !name.startsWith('.') ? name : null;
+}
+
 async function staticFile(req, res) {
   const requested = req.url === '/' ? '/index.html' : req.url.split('?')[0];
   const file = normalize(join(PUBLIC, requested));
@@ -180,6 +215,69 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/voices') return send(res, 200, { voices: await listVoices(), limit: MAX_VOICES });
     if (req.method === 'GET' && url.pathname === '/api/pronunciations') return send(res, 200, { text: await readPronunciations() });
+
+    if (req.method === 'GET' && url.pathname === '/api/hf') {
+      const hf = await readHf();
+      return send(res, 200, { configured: Boolean(hf.token), user: hf.user || null, canWrite: Boolean(hf.canWrite) });
+    }
+    if (req.method === 'PUT' && url.pathname === '/api/hf') {
+      const token = String((await body(req)).token || '').trim();
+      if (!/^hf_[A-Za-z0-9]{20,}$/.test(token)) return send(res, 400, { error: 'Il token Hugging Face inizia con “hf_”.' });
+      let info;
+      try { info = await checkHfToken(token); } catch (error) { return send(res, 400, { error: error.message }); }
+      await mkdir(dirname(HF_SETTINGS), { recursive: true });
+      await writeFile(HF_SETTINGS, JSON.stringify({ token, ...info }, null, 2));
+      return send(res, 200, { configured: true, user: info.user, canWrite: info.canWrite });
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/training/files') return send(res, 200, { files: await listTrainingFiles() });
+    if (req.method === 'POST' && url.pathname === '/api/training/files') {
+      const name = safeFileName(decodeURIComponent(req.headers['x-file-name'] || ''));
+      if (!name || !/\.(mp3|wav|m4a|ogg|flac)$/i.test(name)) return send(res, 400, { error: 'Usa file MP3, WAV, M4A, OGG o FLAC.' });
+      const chunks = [];
+      let total = 0;
+      for await (const chunk of req) {
+        total += chunk.length;
+        if (total > 500 * 1024 * 1024) return send(res, 400, { error: 'File troppo grande (massimo 500 MB).' });
+        chunks.push(chunk);
+      }
+      await mkdir(TRAINING, { recursive: true });
+      await writeFile(join(TRAINING, name), Buffer.concat(chunks));
+      return send(res, 201, { files: await listTrainingFiles() });
+    }
+    const trainingFileMatch = url.pathname.match(/^\/api\/training\/files\/(.+)$/);
+    if (req.method === 'DELETE' && trainingFileMatch) {
+      const name = safeFileName(decodeURIComponent(trainingFileMatch[1]));
+      if (name) await rm(join(TRAINING, name), { force: true });
+      return send(res, 200, { files: await listTrainingFiles() });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/training/start') {
+      const input = await body(req);
+      const hf = await readHf();
+      if (!hf.token) return send(res, 400, { error: 'Prima salva il token Hugging Face.' });
+      if (!hf.canWrite) return send(res, 400, { error: 'Il token Hugging Face deve avere il permesso di scrittura (Write).' });
+      const files = (await listTrainingFiles()).map((file) => ({ ...file, path: join(TRAINING, file.name) }));
+      if (!files.length) return send(res, 400, { error: 'Aggiungi almeno una registrazione della tua voce.' });
+      if ((await listVoices()).length >= MAX_VOICES) return send(res, 400, { error: `Hai già ${MAX_VOICES} voci: eliminane una per fare spazio a quella addestrata.` });
+      const voiceName = safeName(input.voiceName) || 'Voce addestrata';
+      const speaker = voiceName.toLowerCase().normalize('NFD').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32) || 'voce';
+      const repo = `${hf.user}/clova-voice-${speaker.replace(/_/g, '-')}`;
+      try {
+        const job = cloud.startTraining({
+          files, repo, speaker, epochs: Math.min(10, Math.max(1, Number(input.epochs) || 3)),
+          maxRate: Math.min(5, Math.max(0.2, Number(input.hourlyRate) || 1)),
+          onTrained: async (result) => {
+            const id = randomUUID();
+            await mkdir(join(VOICES, id), { recursive: true });
+            await writeFile(join(VOICES, id, 'profile.json'), JSON.stringify({
+              id, name: voiceName, type: 'trained', repo: result.repo, speaker: result.speaker,
+              createdAt: new Date().toISOString(), size: 0, clips: result.clips, minutes: result.minutes
+            }, null, 2));
+          }
+        });
+        return send(res, 202, { id: job.id, repo });
+      } catch (error) { return send(res, 409, { error: error.message }); }
+    }
     if (req.method === 'PUT' && url.pathname === '/api/pronunciations') {
       const { text = '' } = await body(req);
       if (String(text).length > 50_000) return send(res, 400, { error: 'Dizionario troppo lungo.' });

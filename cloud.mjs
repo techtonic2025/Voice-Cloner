@@ -18,7 +18,7 @@ const CLIP_VERSION = 2;
 // Sampling presets sent to the worker; "natural" keeps the model defaults (temperature 0.9, top_p 1).
 const STABILITY = { stable: { temperature: 0.6, topP: 0.9 }, very: { temperature: 0.4, topP: 0.8 } };
 
-export function createCloud({ root, voicesDir }) {
+export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
   const outputsDir = join(root, 'outputs');
   const activeFile = join(root, 'data', 'active-instances.json');
   const jobs = new Map();
@@ -105,13 +105,13 @@ export function createCloud({ root, voicesDir }) {
   }
 
   // compute_cap 800-900 = Ampere/Ada: Blackwell (1200) is not supported by torch 2.6 + flash-attn 2.7.
-  async function searchOffers(maxRate, characters) {
+  async function searchOffers(maxRate, characters, minGpuRam = 16000) {
     const data = await vast('/bundles/', {
       method: 'POST',
       body: {
         limit: 200, type: 'ondemand',
         verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
-        num_gpus: { eq: 1 }, gpu_ram: { gte: 16000 }, compute_cap: { gte: 800, lte: 900 },
+        num_gpus: { eq: 1 }, gpu_ram: { gte: minGpuRam }, compute_cap: { gte: 800, lte: 900 },
         cuda_max_good: { gte: 12.6 }, reliability: { gte: 0.98 },
         inet_down: { gte: 1000 }, disk_bw: { gte: 1000 }, disk_space: { gte: 40 }, direct_port_count: { gte: 1 },
         dph_total: { lte: maxRate }, order: [['dlperf', 'desc']]
@@ -192,9 +192,11 @@ export function createCloud({ root, voicesDir }) {
     return job;
   }
 
-  async function rent(job, signal, { maxRate, characters }) {
+  async function rent(job, signal, { maxRate, characters, minGpuRam }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
-    const offers = await searchOffers(maxRate, characters);
+    const offers = await searchOffers(maxRate, characters, minGpuRam);
+    // Needed on the GPU to download private fine-tuned models and to upload new ones.
+    const hfToken = await getHfToken();
     if (!offers.length) throw new Error(`Nessuna GPU veloce disponibile sotto $${maxRate}/ora. Alza la tariffa massima e riprova.`);
 
     const token = randomBytes(24).toString('hex');
@@ -213,7 +215,7 @@ export function createCloud({ root, voicesDir }) {
           method: 'PUT', signal,
           body: {
             client_id: 'me', image: IMAGE, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
-            disk: 40, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}`,
+            disk: 40, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
             ...(IMAGE_LOGIN ? { image_login: IMAGE_LOGIN } : {})
           }
         });
@@ -299,11 +301,17 @@ export function createCloud({ root, voicesDir }) {
 
       // 3. Submit the job. A cached full-sample clip + transcript skips Whisper entirely.
       set('uploading', 48, job.reused ? 'GPU già accesa: invio subito voce e testo…' : 'Invio della voce e del testo…');
-      const useClip = Boolean(voice.clipFilename && voice.referenceText && voice.clipVersion === CLIP_VERSION);
-      const referenceFile = join(voicesDir, voice.id, useClip ? voice.clipFilename : voice.filename);
       const form = new FormData();
-      form.append('reference', new Blob([await readFile(referenceFile)], { type: useClip ? 'audio/wav' : voice.contentType }), useClip ? 'reference.wav' : voice.filename);
-      form.append('reference_text', useClip ? voice.referenceText : '');
+      if (voice.type === 'trained') {
+        // Fine-tuned voice: the worker downloads the model from the private HF repo.
+        form.append('trained_repo', voice.repo);
+        form.append('speaker', voice.speaker);
+      } else {
+        const useClip = Boolean(voice.clipFilename && voice.referenceText && voice.clipVersion === CLIP_VERSION);
+        const referenceFile = join(voicesDir, voice.id, useClip ? voice.clipFilename : voice.filename);
+        form.append('reference', new Blob([await readFile(referenceFile)], { type: useClip ? 'audio/wav' : voice.contentType }), useClip ? 'reference.wav' : voice.filename);
+        form.append('reference_text', useClip ? voice.referenceText : '');
+      }
       form.append('text', text);
       form.append('language', language);
       form.append('pause', String(pause));
@@ -331,7 +339,10 @@ export function createCloud({ root, voicesDir }) {
         } else if (remote.status === 'checking') {
           set('generating', 91, `Whisper ascolta i ${remote.takes} tentativi di ogni blocco e sceglie i migliori…`);
         } else {
-          set('generating', 50, remote.status === 'preparing' ? 'Preparo il campione completo e lo trascrivo (solo la prima volta)…' : 'In coda…');
+          set('generating', 50, {
+            preparing: 'Preparo il campione e lo trascrivo…',
+            loading_trained: 'Scarico e carico il tuo modello addestrato (solo la prima volta per ogni GPU)…'
+          }[remote.status] || 'In coda…');
         }
       }
 
@@ -389,6 +400,81 @@ export function createCloud({ root, voicesDir }) {
     return rest;
   }
 
+  // Fine-tuning: always on a fresh GPU with 40 GB+ (full fine-tune of the 1.7B model),
+  // always destroyed at the end; the result lives in the user's private HF repo.
+  function startTraining({ files, repo, speaker, epochs, maxRate, maxHours = 3, onTrained }) {
+    if (running) throw new Error('C’è già un lavoro in corso. Attendi o annullalo.');
+    const job = {
+      id: randomUUID(), kind: 'training', status: 'searching', percent: 2,
+      detail: 'Cerco una GPU da almeno 40 GB…', startedAt: Date.now(), cost: 0, error: null
+    };
+    const controller = new AbortController();
+    const watchdog = setTimeout(() => controller.abort(new Error(`Tempo massimo di addestramento (${maxHours} ore) raggiunto.`)), maxHours * 3_600_000);
+    job.cancel = () => controller.abort(new Error('Addestramento annullato.'));
+    jobs.set(job.id, job);
+    running = job;
+    train(job, controller.signal, { files, repo, speaker, epochs, maxRate, onTrained })
+      .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
+      .finally(() => { clearTimeout(watchdog); running = null; });
+    return job;
+  }
+
+  async function train(job, signal, { files, repo, speaker, epochs, maxRate, onTrained }) {
+    const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
+    let current = null;
+    try {
+      await endSession(); // A kept-alive voice GPU is usually too small for training.
+      try {
+        // characters: 0 ranks offers on boot time only (training time is not text-based).
+        current = await rent(job, signal, { maxRate, characters: 0, minGpuRam: 40_000 });
+      } catch (error) {
+        current = session;
+        throw error;
+      }
+      const worker = (path, options = {}) => workerFetch(current, path, { ...options, signal });
+
+      const form = new FormData();
+      let bytes = 0;
+      for (const file of files) {
+        const data = await readFile(file.path);
+        bytes += data.length;
+        form.append('files', new Blob([data]), file.name);
+      }
+      form.append('repo', repo);
+      form.append('speaker', speaker);
+      form.append('epochs', String(epochs));
+      form.append('language', 'Italian');
+      set('uploading', 45, `Invio di ${files.length} registrazioni (${Math.round(bytes / 1_048_576)} MB)…`);
+      const submitted = await worker('/train', { method: 'POST', body: form });
+      const submittedData = await submitted.json();
+      if (!submitted.ok) throw new Error(submittedData.detail || 'Il worker ha rifiutato l’addestramento.');
+
+      const base = { queued: 46, segmenting: 50, codes: 58, uploading: 96 };
+      let remote;
+      for (;;) {
+        await sleep(5000, signal);
+        job.cost = costSince(current, current.rentedAt);
+        remote = await (await worker(`/train/${submittedData.id}`)).json();
+        if (remote.status === 'error') throw new Error(remote.error);
+        Object.assign(job, { clips: remote.clips, minutes: remote.minutes, dropped: remote.dropped, loss: remote.loss, epoch: remote.epoch, epochs: remote.epochs });
+        if (remote.status === 'done') break;
+        const percent = remote.phase === 'training' ? 60 + Math.round(35 * (remote.epoch || 0) / (remote.epochs || epochs)) : base[remote.phase] ?? 46;
+        set('training', percent, remote.detail || 'In corso…');
+      }
+      Object.assign(job, { repo, speaker });
+      await onTrained?.(job);
+      job.trained = true;
+    } finally {
+      if (current && session === current) {
+        set(job.trained ? 'destroying' : job.status, job.trained ? 98 : job.percent, 'Distruzione della GPU e del suo disco…');
+        job.destroyed = await endSession();
+        job.cost = costSince(current, current.rentedAt);
+      }
+    }
+    set('done', 100, `Addestramento completato: ${job.clips} frasi (${job.minutes} min) · modello salvato in ${repo} (privato) · `
+      + (job.destroyed ? `GPU distrutta, costo $${job.cost}.` : `controlla su cloud.vast.ai che l’istanza sia distrutta.`));
+  }
+
   function instanceStatus() {
     if (!session) return { active: false, lastDestroy };
     return {
@@ -404,7 +490,7 @@ export function createCloud({ root, voicesDir }) {
   }
 
   return {
-    outputsDir, cleanupOrphans, startJob, instanceStatus, destroyInstance,
+    outputsDir, cleanupOrphans, startJob, startTraining, instanceStatus, destroyInstance,
     getJob: (id) => publicJob(jobs.get(id)),
     cancelJob: (id) => { jobs.get(id)?.cancel?.(); return Boolean(jobs.get(id)); },
     activeInstanceIds: readActive,

@@ -4,5 +4,8 @@ uvicorn[standard]
 soundfile
 numpy
 audiotsm
+librosa
+accelerate
+tensorboard
 qwen-tts
 faster-whisper

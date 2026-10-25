@@ -26,7 +26,10 @@ import torch
 from faster_whisper import WhisperModel
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from huggingface_hub import snapshot_download
 from qwen_tts import Qwen3TTSModel
+
+import train as trainer
 
 app = FastAPI(title="Clova Voice Qwen worker", docs_url=None, redoc_url=None)
 MODEL: Qwen3TTSModel | None = None
@@ -46,6 +49,9 @@ WORK_DIR = Path(tempfile.gettempdir()) / "clova-jobs"
 JOBS: dict[str, dict] = {}
 # Voice prompts by reference hash: a warm instance reuses them across jobs.
 PROMPTS: dict[str, object] = {}
+# Fine-tuned models by HF repo, downloaded on first use (one kept at a time).
+TRAINED: dict[str, Qwen3TTSModel] = {}
+HF_TOKEN = os.getenv("HF_TOKEN", "")
 LANGUAGE_CODES = {"Italian": "it", "English": "en", "Spanish": "es", "French": "fr"}
 
 
@@ -77,6 +83,18 @@ def load_models() -> None:
         TRANSCRIBER = WhisperModel(WHISPER_MODEL_PATH, device="cuda", compute_type="float16")
     except Exception as exc:  # Reported through /health so the orchestrator can give up early.
         LOAD_ERROR = str(exc)
+
+
+def get_trained(repo: str) -> Qwen3TTSModel:
+    if repo not in TRAINED:
+        TRAINED.clear()
+        torch.cuda.empty_cache()
+        folder = Path("/models/trained") / re.sub(r"[^A-Za-z0-9_.-]", "_", repo)
+        snapshot_download(repo, local_dir=folder, token=HF_TOKEN or None)
+        TRAINED[repo] = Qwen3TTSModel.from_pretrained(
+            str(folder), device_map="cuda:0", dtype=torch.bfloat16, attn_implementation=attention_implementation(),
+        )
+    return TRAINED[repo]
 
 
 @app.on_event("startup")
@@ -229,39 +247,55 @@ def take_score(wav: np.ndarray, sample_rate: int, target: str, language: str) ->
     return score
 
 
-def run_job(job_id: str, source: Path, reference_text: str, text: str, language: str, pause: float,
+def run_job(job_id: str, source: Path | None, reference_text: str, text: str, language: str, pause: float,
             temperature: float, top_p: float, takes: int, pronunciations: list[list[str]], speed: float,
-            ref_seconds: float) -> None:
+            ref_seconds: float, trained_repo: str = "", speaker: str = "") -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
+    sampling: dict[str, object] = {}
+    if temperature > 0:
+        sampling.update(do_sample=True, temperature=temperature)
+    if 0 < top_p < 1:
+        sampling["top_p"] = top_p
     try:
         with GPU_LOCK:
-            job["status"] = "preparing"
-            reference = source
-            full_length = ref_seconds >= REF_MAX_SECONDS
-            if not reference_text or not full_length:
-                # Only the full-length clip is cached by the app; shorter ones are cut
-                # (and transcribed) from whatever was sent, every time.
-                reference, reference_text = prepare_reference(source, language, folder, ref_seconds)
-                job["prepared_reference"] = full_length
-            job["reference_text"] = reference_text
-            key = hashlib.sha1(reference.read_bytes() + reference_text.encode()).hexdigest()
-            prompt = PROMPTS.get(key)
-            if prompt is None:
-                prompt = MODEL.create_voice_clone_prompt(
-                    ref_audio=str(reference), ref_text=reference_text, x_vector_only_mode=False
-                )
-                PROMPTS.clear()
-                PROMPTS[key] = prompt
+            if trained_repo:
+                # Fine-tuned voice: no reference needed, the speaker lives in the model.
+                job["status"] = "loading_trained"
+                trained_model = get_trained(trained_repo)
+
+                def synthesize(texts: list[str]):
+                    return trained_model.generate_custom_voice(
+                        text=texts, speaker=speaker, language=[language] * len(texts), max_new_tokens=2048, **sampling,
+                    )
+            else:
+                job["status"] = "preparing"
+                reference = source
+                full_length = ref_seconds >= REF_MAX_SECONDS
+                if not reference_text or not full_length:
+                    # Only the full-length clip is cached by the app; shorter ones are cut
+                    # (and transcribed) from whatever was sent, every time.
+                    reference, reference_text = prepare_reference(source, language, folder, ref_seconds)
+                    job["prepared_reference"] = full_length
+                job["reference_text"] = reference_text
+                key = hashlib.sha1(reference.read_bytes() + reference_text.encode()).hexdigest()
+                prompt = PROMPTS.get(key)
+                if prompt is None:
+                    prompt = MODEL.create_voice_clone_prompt(
+                        ref_audio=str(reference), ref_text=reference_text, x_vector_only_mode=False
+                    )
+                    PROMPTS.clear()
+                    PROMPTS[key] = prompt
+
+                def synthesize(texts: list[str]):
+                    return MODEL.generate_voice_clone(
+                        text=texts, language=[language] * len(texts), voice_clone_prompt=prompt,
+                        max_new_tokens=2048, **sampling,
+                    )
 
             chunks = split_text(clean_text(text))
             spoken = [apply_pronunciations(chunk, pronunciations) for chunk in chunks]
             job.update(status="generating", total=len(chunks), done=0, takes=takes)
-            sampling: dict[str, object] = {}
-            if temperature > 0:
-                sampling.update(do_sample=True, temperature=temperature)
-            if 0 < top_p < 1:
-                sampling["top_p"] = top_p
             # With several takes per chunk, each copy is sampled independently in the
             # same batch and Whisper keeps the one that best matches the text.
             items = [index for index in range(len(chunks)) for _ in range(takes)]
@@ -269,10 +303,7 @@ def run_job(job_id: str, source: Path, reference_text: str, text: str, language:
             sample_rate = 24_000
             for offset in range(0, len(items), BATCH_SIZE):
                 batch = items[offset:offset + BATCH_SIZE]
-                wavs, sample_rate = MODEL.generate_voice_clone(
-                    text=[spoken[i] for i in batch], language=[language] * len(batch),
-                    voice_clone_prompt=prompt, max_new_tokens=2048, **sampling,
-                )
+                wavs, sample_rate = synthesize([spoken[i] for i in batch])
                 for index, wav in zip(batch, wavs):
                     candidates[index].append(np.asarray(wav, dtype="float32").reshape(-1))
                 job["done"] = sum(len(c) == takes for c in candidates)
@@ -329,8 +360,10 @@ def health() -> dict[str, object]:
 
 @app.post("/jobs")
 async def create_job(
-    reference: UploadFile = File(...),
+    reference: UploadFile | None = File(None),
     reference_text: str = Form(""),
+    trained_repo: str = Form(""),
+    speaker: str = Form(""),
     text: str = Form(...),
     language: str = Form("Italian"),
     pause: float = Form(0.35),
@@ -354,25 +387,86 @@ async def create_job(
         raise HTTPException(status_code=422, detail="Serve il testo da generare")
     if len(text) > MAX_TEXT_CHARS:
         raise HTTPException(status_code=422, detail=f"Testo troppo lungo (massimo {MAX_TEXT_CHARS} caratteri)")
+    trained_repo, speaker = trained_repo.strip(), speaker.strip()
+    if bool(trained_repo) != bool(speaker) or (not trained_repo and reference is None):
+        raise HTTPException(status_code=422, detail="Serve un campione vocale oppure un modello addestrato con il suo speaker")
 
     job_id = secrets.token_hex(12)
     folder = WORK_DIR / job_id
     folder.mkdir(parents=True)
-    suffix = Path(reference.filename or "reference.wav").suffix.lower() or ".wav"
-    source = folder / f"reference{suffix}"
-    with source.open("wb") as destination:
-        while chunk := await reference.read(1024 * 1024):
-            destination.write(chunk)
+    source = None
+    if reference is not None:
+        suffix = Path(reference.filename or "reference.wav").suffix.lower() or ".wav"
+        source = folder / f"reference{suffix}"
+        with source.open("wb") as destination:
+            while chunk := await reference.read(1024 * 1024):
+                destination.write(chunk)
 
     JOBS[job_id] = {"status": "queued", "done": 0, "total": 0, "started": time.time()}
     threading.Thread(
         target=run_job,
         args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5),
               min(max(top_p, 0), 1), min(max(takes, 1), 3), entries, min(max(speed, 0.7), 1.3),
-              min(max(ref_seconds, 10.0), REF_MAX_SECONDS)),
+              min(max(ref_seconds, 10.0), REF_MAX_SECONDS), trained_repo, speaker),
         daemon=True,
     ).start()
     return {"id": job_id}
+
+
+@app.post("/train")
+async def create_training(
+    files: list[UploadFile] = File(...),
+    repo: str = Form(...),
+    speaker: str = Form("techtonic"),
+    language: str = Form("Italian"),
+    epochs: int = Form(3),
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    require_token(authorization)
+    if MODEL is None or TRANSCRIBER is None:
+        raise HTTPException(status_code=503, detail=LOAD_ERROR or "Modello non ancora caricato")
+    if not HF_TOKEN:
+        raise HTTPException(status_code=422, detail="Serve un token Hugging Face con permesso di scrittura")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo.strip()) or not re.fullmatch(r"[a-z0-9_]{2,32}", speaker):
+        raise HTTPException(status_code=422, detail="Nome del repository o dello speaker non valido")
+
+    job_id = f"train-{secrets.token_hex(8)}"
+    folder = WORK_DIR / job_id
+    inputs = folder / "input"
+    inputs.mkdir(parents=True)
+    paths = []
+    for index, upload in enumerate(files, start=1):
+        path = inputs / f"{index:02d}{Path(upload.filename or 'audio.mp3').suffix.lower() or '.mp3'}"
+        with path.open("wb") as destination:
+            while chunk := await upload.read(4 * 1024 * 1024):
+                destination.write(chunk)
+        paths.append(path)
+
+    JOBS[job_id] = {"status": "running", "phase": "queued", "detail": "In coda…", "started": time.time()}
+
+    def run() -> None:
+        job = JOBS[job_id]
+        try:
+            with GPU_LOCK:
+                trainer.train(
+                    job, paths, folder, transcriber=TRANSCRIBER, clean_text=clean_text, language=language,
+                    language_code=LANGUAGE_CODES.get(language), speaker=speaker, repo=repo.strip(), token=HF_TOKEN,
+                    epochs=min(max(epochs, 1), 10), base_model=MODEL_PATH, attention=attention_implementation(),
+                )
+            job.update(status="done", elapsed=round(time.time() - job["started"], 1))
+        except Exception as exc:
+            job.update(status="error", error=f"Addestramento non riuscito: {exc}")
+        finally:
+            torch.cuda.empty_cache()
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"id": job_id}
+
+
+@app.get("/train/{job_id}")
+def training_status(job_id: str, authorization: str | None = Header(default=None)) -> dict:
+    require_token(authorization)
+    return get_job(job_id)
 
 
 def get_job(job_id: str) -> dict:
