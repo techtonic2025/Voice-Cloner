@@ -122,7 +122,11 @@ button.secondary, .voice-row button, .instance-banner button, .download + .downl
 button.secondary, .voice-row button, .instance-banner button { color: #ffb0a6; border-color: rgba(255, 77, 77, .4); }
 button.secondary:hover, .voice-row button:hover, .instance-banner button:hover { background: rgba(255, 77, 77, .14); box-shadow: none; }
 .download + .download:hover { background: rgba(255, 255, 255, .1); box-shadow: none; }
-.actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+button.ghost { color: #ffb27a; background: var(--orange-soft); border: 1px solid rgba(255, 122, 26, .4); box-shadow: none; padding: 10px 16px; font-size: 14px; }
+button.ghost:hover { background: rgba(255, 122, 26, .22); box-shadow: none; }
+#pronunciations { font: 14px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace; min-height: 220px; }
+code { font: 13px ui-monospace, Consolas, monospace; color: #ffb27a; background: rgba(255, 122, 26, .1); padding: 1px 6px; border-radius: 6px; }
 
 /* Progress */
 .progress-panel {

@@ -134,7 +134,8 @@ $('generateButton').addEventListener('click', async () => {
     voiceId, text: text.value, language: $('language').value, characters: text.value.length,
     hourlyRate: Number($('rate').value), minutes: Number($('minutes').value), safetyMinutes: 10,
     budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked, pause: Number($('pause').value),
-    keepAlive: document.querySelector('input[name="lifecycle"]:checked').value === 'keep'
+    keepAlive: document.querySelector('input[name="lifecycle"]:checked').value === 'keep',
+    stable: $('stable').checked
   };
   try {
     const response = await fetch('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
@@ -163,6 +164,25 @@ $('generateButton').addEventListener('click', async () => {
     setBusy(false);
   }
 });
+
+// Pronunciation dictionary, saved in data/pronunce.txt and applied on the server.
+async function loadPronunciations() {
+  const response = await fetch('/api/pronunciations');
+  if (response.ok) $('pronunciations').value = (await response.json()).text;
+}
+
+$('savePronunciations').addEventListener('click', async () => {
+  $('pronunciationStatus').textContent = 'Salvataggio…';
+  try {
+    const response = await fetch('/api/pronunciations', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: $('pronunciations').value }) });
+    const data = await response.json();
+    $('pronunciationStatus').textContent = response.ok ? `Salvato: ${data.entries} parole.` : data.error;
+  } catch {
+    $('pronunciationStatus').textContent = 'Server non raggiungibile.';
+  }
+});
+
+loadPronunciations().catch(() => {});
 
 // Kept-alive GPU: always-visible banner with countdown, cost and a destroy button.
 let instance = { active: false };

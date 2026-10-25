@@ -159,7 +159,7 @@ export function createCloud({ root, voicesDir }) {
     return null;
   }
 
-  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive }) {
+  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive, stable }) {
     if (running) throw new Error('C’è già una generazione in corso. Attendi o annullala.');
     const job = {
       id: randomUUID(), status: 'searching', percent: 2, detail: 'Cerco una GPU adatta…',
@@ -172,7 +172,7 @@ export function createCloud({ root, voicesDir }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    run(job, controller.signal, { voice, text, language, maxRate, pause, keepAlive })
+    run(job, controller.signal, { voice, text, language, maxRate, pause, keepAlive, stable })
       .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
       .finally(() => { clearTimeout(watchdog); running = null; });
     return job;
@@ -241,7 +241,7 @@ export function createCloud({ root, voicesDir }) {
     return current;
   }
 
-  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive }) {
+  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive, stable }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
     let current = null;
     let success = false;
@@ -272,6 +272,8 @@ export function createCloud({ root, voicesDir }) {
       form.append('text', text);
       form.append('language', language);
       form.append('pause', String(pause));
+      // Lower sampling temperature: fewer slips like doubled consonants, flatter intonation.
+      if (stable) form.append('temperature', '0.6');
       const submitted = await worker('/jobs', { method: 'POST', body: form });
       const submittedData = await submitted.json();
       if (!submitted.ok) throw new Error(submittedData.detail || 'Il worker ha rifiutato il lavoro.');

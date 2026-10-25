@@ -82,6 +82,64 @@ function estimate({ characters = 5000, hourlyRate = 0.20, minutes = 15, safetyMi
   };
 }
 
+// Pronunciation dictionary: Qwen reads every word with Italian rules, so foreign
+// words are respelled the way they sound ("file" -> "fàil") before generation.
+// One "parola = pronuncia" per line, editable from the page; lines starting with # are comments.
+const PRONUNCIATIONS = join(ROOT, 'data', 'pronunce.txt');
+const DEFAULT_PRONUNCIATIONS = `# Una riga per parola: parola = come va pronunciata (vale solo per i testi in italiano).
+# Le maiuscole non contano. Gli accenti indicano dove cade l'accento.
+file = fàil
+like = làik
+download = daunlòd
+upload = aplòd
+online = onlàin
+offline = offlàin
+browser = bràuser
+computer = compiùter
+software = sòftuer
+hardware = hàrduer
+mouse = màus
+email = imèil
+e-mail = imèil
+team = tìm
+feedback = fìdbek
+smartphone = smàrtfon
+YouTube = iutùb
+workflow = uòrkflou
+password = pàssuord
+backup = bècap
+update = apdèit
+setup = setàp
+display = displèi
+privacy = pràivasi
+weekend = uìkend
+streaming = strìming
+`;
+
+async function readPronunciations() {
+  try { return await readFile(PRONUNCIATIONS, 'utf8'); } catch { return DEFAULT_PRONUNCIATIONS; }
+}
+
+function parsePronunciations(source) {
+  return source.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#') && line.includes('='))
+    .map((line) => line.split('=').map((part) => part.trim()))
+    .filter(([word, spoken]) => word && spoken)
+    // Longest first, so "e-mail" wins over "mail".
+    .sort((a, b) => b[0].length - a[0].length);
+}
+
+function applyPronunciations(text, entries) {
+  let result = text;
+  for (const [word, spoken] of entries) {
+    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    result = result.replace(new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'giu'), (match) =>
+      match[0] === match[0].toUpperCase() && match[0] !== match[0].toLowerCase() ? spoken[0].toUpperCase() + spoken.slice(1) : spoken);
+  }
+  return result;
+}
+
 async function staticFile(req, res) {
   const requested = req.url === '/' ? '/index.html' : req.url.split('?')[0];
   const file = normalize(join(PUBLIC, requested));
@@ -104,6 +162,14 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/api/voices') return send(res, 200, { voices: await listVoices(), limit: MAX_VOICES });
+    if (req.method === 'GET' && url.pathname === '/api/pronunciations') return send(res, 200, { text: await readPronunciations() });
+    if (req.method === 'PUT' && url.pathname === '/api/pronunciations') {
+      const { text = '' } = await body(req);
+      if (String(text).length > 50_000) return send(res, 400, { error: 'Dizionario troppo lungo.' });
+      await mkdir(dirname(PRONUNCIATIONS), { recursive: true });
+      await writeFile(PRONUNCIATIONS, String(text));
+      return send(res, 200, { ok: true, entries: parsePronunciations(String(text)).length });
+    }
 
     if (req.method === 'POST' && url.pathname === '/api/voices') {
       const name = safeName(decodeURIComponent(req.headers['x-voice-name'] || ''));
@@ -135,7 +201,10 @@ const server = createServer(async (req, res) => {
       if (!input.confirmDestroy) return send(res, 400, { error: 'Per proseguire devi confermare la distruzione automatica dell’istanza.' });
       const selectedVoice = safeId(input.voiceId);
       if (!selectedVoice || !(await listVoices()).some((voice) => voice.id === selectedVoice)) return send(res, 400, { error: 'Scegli una voce salvata.' });
-      const text = String(input.text || '').trim();
+      const original = String(input.text || '').trim();
+      const text = input.language === 'Italian' || !input.language
+        ? applyPronunciations(original, parsePronunciations(await readPronunciations()))
+        : original;
       if (!text) return send(res, 400, { error: 'Incolla il testo da trasformare in voce.' });
       if (text.length > MAX_TEXT_CHARS) return send(res, 400, { error: `Testo troppo lungo: massimo ${MAX_TEXT_CHARS.toLocaleString('it-IT')} caratteri.` });
       const maxRate = Math.min(5, Math.max(0.05, Number(input.hourlyRate) || 0.8));
@@ -146,7 +215,7 @@ const server = createServer(async (req, res) => {
       const language = ['Italian', 'English', 'Spanish', 'French'].includes(input.language) ? input.language : 'Italian';
       const pause = Math.min(2, Math.max(0, Number(input.pause) || 0.35));
       try {
-        const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text, language, maxRate, budgetCap, pause, keepAlive: input.keepAlive === true });
+        const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text, language, maxRate, budgetCap, pause, keepAlive: input.keepAlive === true, stable: input.stable === true });
         return send(res, 202, { id: job.id, cost });
       } catch (error) { return send(res, 409, { error: error.message }); }
     }

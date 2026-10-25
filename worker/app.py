@@ -151,7 +151,8 @@ def split_text(text: str, limit: int = CHUNK_CHARS) -> list[str]:
     return chunks
 
 
-def run_job(job_id: str, source: Path, reference_text: str, text: str, language: str, pause: float) -> None:
+def run_job(job_id: str, source: Path, reference_text: str, text: str, language: str, pause: float,
+            temperature: float) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     try:
@@ -174,12 +175,13 @@ def run_job(job_id: str, source: Path, reference_text: str, text: str, language:
             chunks = split_text(text)
             job.update(status="generating", total=len(chunks), done=0)
             parts: list[np.ndarray] = []
+            sampling = {"do_sample": True, "temperature": temperature} if temperature > 0 else {}
             sample_rate = 24_000
             for offset in range(0, len(chunks), BATCH_SIZE):
                 batch = chunks[offset:offset + BATCH_SIZE]
                 wavs, sample_rate = MODEL.generate_voice_clone(
                     text=batch, language=[language] * len(batch), voice_clone_prompt=prompt,
-                    max_new_tokens=2048,
+                    max_new_tokens=2048, **sampling,
                 )
                 parts.extend(np.asarray(w, dtype="float32").reshape(-1) for w in wavs)
                 job["done"] = len(parts)
@@ -224,6 +226,7 @@ async def create_job(
     text: str = Form(...),
     language: str = Form("Italian"),
     pause: float = Form(0.35),
+    temperature: float = Form(0.0),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -246,7 +249,8 @@ async def create_job(
 
     JOBS[job_id] = {"status": "queued", "done": 0, "total": 0, "started": time.time()}
     threading.Thread(
-        target=run_job, args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2)),
+        target=run_job,
+        args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5)),
         daemon=True,
     ).start()
     return {"id": job_id}
