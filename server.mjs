@@ -143,7 +143,7 @@ async function historyEntry(id) {
   return {
     id, createdAt: meta.createdAt || new Date(audio.mtimeMs).toISOString(),
     voiceName: meta.voiceName || null, text: meta.text || null, language: meta.language || null,
-    stability: meta.stability || null, takes: meta.takes || null, chunks: meta.chunks ?? null,
+    stability: meta.stability || null, takes: meta.takes || null, speed: meta.speed || null, chunks: meta.chunks ?? null,
     // 16-bit mono 24 kHz WAV: 48,000 bytes per second after the 44-byte header.
     audioSeconds: meta.audioSeconds ?? +((audio.size - 44) / 48_000).toFixed(1),
     quality: meta.quality ?? null, weakest: meta.weakest || [], cost: meta.cost ?? null,
@@ -232,6 +232,7 @@ const server = createServer(async (req, res) => {
         const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text, language, maxRate, budgetCap, pause, keepAlive: input.keepAlive === true,
           stability: ['natural', 'stable', 'very'].includes(input.stability) ? input.stability : 'stable',
           takes: input.quality === 'high' ? 3 : 1,
+          speed: Math.min(1.3, Math.max(0.7, Number(input.speed) || 1)),
           pronunciations: language === 'Italian' ? parsePronunciations(await readPronunciations()) : [] });
         return send(res, 202, { id: job.id, cost });
       } catch (error) { return send(res, 409, { error: error.message }); }

@@ -3,5 +3,6 @@ python-multipart
 uvicorn[standard]
 soundfile
 numpy
+audiotsm
 qwen-tts
 faster-whisper

@@ -127,6 +127,43 @@ def prepare_reference(source: Path, language: str, folder: Path) -> tuple[Path, 
     return clip, " ".join(s.text.strip() for s in window).strip()
 
 
+def clean_text(text: str) -> str:
+    """Fix what pasted text (web pages, manuals) usually gets wrong, so pauses land
+    where a reader would put them: "Mostra.Per" -> "Mostra. Per", hard-wrapped
+    lines joined, list lines turned into sentences, bullets and odd spaces removed."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace(" ", " ").replace("\t", " ")
+    text = re.sub(r"(?m)^[ ]*(?:[•·▪◦‣*–—-]|\d{1,2}[.)])[ ]+", "", text)  # bullets and "1." / "1)"
+    text = re.sub(r"([.!?…;:])(?=[A-ZÀ-ÖØ-Þ])", r"\1 ", text)  # missing space after a sentence
+    paragraphs = []
+    for block in re.split(r"\n[ ]*\n", text):
+        lines = [line.strip() for line in block.split("\n") if line.strip()]
+        joined = ""
+        for line in lines:
+            if not joined:
+                joined = line
+            elif joined[-1] in ".!?…;:,":
+                joined += " " + line
+            elif line[:1].isupper():  # A new list item or heading without its own punctuation.
+                joined += ". " + line
+            else:  # Hard-wrapped sentence.
+                joined += " " + line
+        if joined:
+            paragraphs.append(re.sub(r" {2,}", " ", joined))
+    return "\n\n".join(paragraphs)
+
+
+def change_speed(wav: np.ndarray, speed: float) -> np.ndarray:
+    """Slow down or speed up speech without changing its pitch (WSOLA)."""
+    if abs(speed - 1.0) < 0.01:
+        return wav
+    from audiotsm import wsola
+    from audiotsm.io.array import ArrayReader, ArrayWriter
+    reader = ArrayReader(wav.reshape(1, -1))
+    writer = ArrayWriter(channels=1)
+    wsola(channels=1, speed=speed).run(reader, writer)
+    return writer.data[0].astype("float32")
+
+
 def split_text(text: str, limit: int = CHUNK_CHARS) -> list[str]:
     """Split into chunks of whole sentences that never cross a paragraph, so each
     chunk keeps one coherent intonation; overlong sentences fall back to commas."""
@@ -191,7 +228,7 @@ def take_score(wav: np.ndarray, sample_rate: int, target: str, language: str) ->
 
 
 def run_job(job_id: str, source: Path, reference_text: str, text: str, language: str, pause: float,
-            temperature: float, top_p: float, takes: int, pronunciations: list[list[str]]) -> None:
+            temperature: float, top_p: float, takes: int, pronunciations: list[list[str]], speed: float) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     try:
@@ -211,7 +248,7 @@ def run_job(job_id: str, source: Path, reference_text: str, text: str, language:
                 PROMPTS.clear()
                 PROMPTS[key] = prompt
 
-            chunks = split_text(text)
+            chunks = split_text(clean_text(text))
             spoken = [apply_pronunciations(chunk, pronunciations) for chunk in chunks]
             job.update(status="generating", total=len(chunks), done=0, takes=takes)
             sampling: dict[str, object] = {}
@@ -250,6 +287,8 @@ def run_job(job_id: str, source: Path, reference_text: str, text: str, language:
                 job["weakest"] = [i + 1 for i, value in enumerate(scores) if value < 0.85]
 
         job["status"] = "packing"
+        # Applied after Whisper picked the takes, so scoring always sees the raw audio.
+        parts = [change_speed(part, speed) for part in parts]
         silence = np.zeros(int(sample_rate * pause), dtype="float32")
         full = []
         for index, part in enumerate(parts):
@@ -293,6 +332,7 @@ async def create_job(
     top_p: float = Form(0.0),
     takes: int = Form(1),
     pronunciations: str = Form("[]"),
+    speed: float = Form(1.0),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -321,7 +361,7 @@ async def create_job(
     threading.Thread(
         target=run_job,
         args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5),
-              min(max(top_p, 0), 1), min(max(takes, 1), 3), entries),
+              min(max(top_p, 0), 1), min(max(takes, 1), 3), entries, min(max(speed, 0.7), 1.3)),
         daemon=True,
     ).start()
     return {"id": job_id}

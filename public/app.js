@@ -135,7 +135,7 @@ $('generateButton').addEventListener('click', async () => {
     hourlyRate: Number($('rate').value), minutes: Number($('minutes').value), safetyMinutes: 10,
     budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked, pause: Number($('pause').value),
     keepAlive: document.querySelector('input[name="lifecycle"]:checked').value === 'keep',
-    stability: $('stability').value, quality: $('quality').value
+    stability: $('stability').value, quality: $('quality').value, speed: Number($('speed').value)
   };
   try {
     const response = await fetch('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
@@ -191,6 +191,7 @@ function renderHistory(entries) {
       duration(entry.audioSeconds),
       entry.chunks ? `${entry.chunks} blocchi` : null,
       entry.stability ? `lettura ${stabilityLabels[entry.stability] || entry.stability}` : null,
+      entry.speed && entry.speed !== 1 ? `velocità ${Math.round(entry.speed * 100)}%` : null,
       entry.takes > 1 ? `qualità alta${entry.quality ? ` (fedeltà ${Math.round(entry.quality * 100)}%)` : ''}` : null,
       entry.cost != null ? `$${entry.cost}` : null,
       bytes(entry.bytes)

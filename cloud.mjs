@@ -173,7 +173,7 @@ export function createCloud({ root, voicesDir }) {
     return null;
   }
 
-  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive, stability, takes, pronunciations }) {
+  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive, stability, takes, pronunciations, speed }) {
     if (running) throw new Error('C’è già una generazione in corso. Attendi o annullala.');
     const job = {
       id: randomUUID(), status: 'searching', percent: 2, detail: 'Cerco una GPU adatta…',
@@ -186,7 +186,7 @@ export function createCloud({ root, voicesDir }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    run(job, controller.signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations })
+    run(job, controller.signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed })
       .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
       .finally(() => { clearTimeout(watchdog); running = null; });
     return job;
@@ -276,7 +276,7 @@ export function createCloud({ root, voicesDir }) {
     return current;
   }
 
-  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations }) {
+  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
     let current = null;
     let success = false;
@@ -312,6 +312,7 @@ export function createCloud({ root, voicesDir }) {
       if (sampling) { form.append('temperature', String(sampling.temperature)); form.append('top_p', String(sampling.topP)); }
       form.append('takes', String(takes));
       form.append('pronunciations', JSON.stringify(pronunciations || []));
+      form.append('speed', String(speed || 1));
       const submitted = await worker('/jobs', { method: 'POST', body: form });
       const submittedData = await submitted.json();
       if (!submitted.ok) throw new Error(submittedData.detail || 'Il worker ha rifiutato il lavoro.');
@@ -355,7 +356,7 @@ export function createCloud({ root, voicesDir }) {
       // Saved next to the audio so the history survives app restarts.
       await writeFile(join(folder, 'meta.json'), JSON.stringify({
         id: job.id, createdAt: new Date(job.startedAt).toISOString(), voiceId: voice.id, voiceName: voice.name,
-        language, text, stability, takes, chunks: job.chunks, audioSeconds: job.audioSeconds,
+        language, text, stability, takes, speed: speed || 1, chunks: job.chunks, audioSeconds: job.audioSeconds,
         quality: job.quality ?? null, weakest: job.weakest ?? [], gpu: job.gpu, cost: job.cost
       }, null, 2));
       success = true;
