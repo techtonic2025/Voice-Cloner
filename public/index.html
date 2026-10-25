@@ -56,9 +56,9 @@
         <h3>3. Avvia</h3>
         <div class="two">
           <label>Nome della voce addestrata<input id="trainedName" type="text" maxlength="40" value="TechTonic" /></label>
-          <label>Epoche di addestramento<select id="epochs"><option value="2">2 (più veloce)</option><option value="3" selected>3 (consigliato)</option><option value="5">5 (più aderente, rischio di “imparare a memoria”)</option></select></label>
+          <label>Epoche di addestramento<select id="epochs"><option value="3">3 (più veloce)</option><option value="5" selected>5 (consigliato)</option><option value="10">10 (più aderente)</option></select></label>
         </div>
-        <p class="helper">Serve una GPU da almeno 40 GB (tariffa massima 1 $/ora). Stima: 30–90 minuti, circa 0,50–1,50 $. La GPU viene distrutta alla fine, anche in caso di errore.</p>
+        <p class="helper">Serve una GPU da almeno 40 GB (tariffa massima 1 $/ora). Stima: 20–60 minuti, circa 0,30–1 $. A fine addestramento ogni epoca legge due frasi di prova e viene salvata solo quella che parla meglio. La GPU viene distrutta alla fine, anche in caso di errore.</p>
         <div class="actions"><button type="button" id="startTraining">Avvia addestramento</button><button type="button" id="cancelTraining" class="secondary" hidden>Annulla e distruggi la GPU</button></div>
         <section class="progress-panel" id="trainProgress" hidden aria-live="polite">
           <div class="progress-heading"><strong id="trainTitle">Preparazione</strong><b id="trainPercent">0%</b></div>

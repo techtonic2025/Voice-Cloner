@@ -419,7 +419,7 @@ async def create_training(
     repo: str = Form(...),
     speaker: str = Form("techtonic"),
     language: str = Form("Italian"),
-    epochs: int = Form(3),
+    epochs: int = Form(5),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -452,6 +452,10 @@ async def create_training(
                     job, paths, folder, transcriber=TRANSCRIBER, clean_text=clean_text, language=language,
                     language_code=LANGUAGE_CODES.get(language), speaker=speaker, repo=repo.strip(), token=HF_TOKEN,
                     epochs=min(max(epochs, 1), 10), base_model=MODEL_PATH, attention=attention_implementation(),
+                    load_model=lambda path: Qwen3TTSModel.from_pretrained(
+                        path, device_map="cuda:0", dtype=torch.bfloat16, attn_implementation=attention_implementation(),
+                    ),
+                    score=take_score,
                 )
             job.update(status="done", elapsed=round(time.time() - job["started"], 1))
         except Exception as exc:

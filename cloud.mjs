@@ -449,14 +449,17 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       const submittedData = await submitted.json();
       if (!submitted.ok) throw new Error(submittedData.detail || 'Il worker ha rifiutato l’addestramento.');
 
-      const base = { queued: 46, segmenting: 50, codes: 58, uploading: 96 };
+      const base = { queued: 46, segmenting: 50, codes: 58, checking: 95, uploading: 97 };
       let remote;
       for (;;) {
         await sleep(5000, signal);
         job.cost = costSince(current, current.rentedAt);
         remote = await (await worker(`/train/${submittedData.id}`)).json();
         if (remote.status === 'error') throw new Error(remote.error);
-        Object.assign(job, { clips: remote.clips, minutes: remote.minutes, dropped: remote.dropped, loss: remote.loss, epoch: remote.epoch, epochs: remote.epochs });
+        Object.assign(job, {
+          clips: remote.clips, minutes: remote.minutes, dropped: remote.dropped, loss: remote.loss, epoch: remote.epoch, epochs: remote.epochs,
+          epochScores: remote.epoch_scores, bestEpoch: remote.best_epoch, fidelity: remote.fidelity
+        });
         if (remote.status === 'done') break;
         const percent = remote.phase === 'training' ? 60 + Math.round(35 * (remote.epoch || 0) / (remote.epochs || epochs)) : base[remote.phase] ?? 46;
         set('training', percent, remote.detail || 'In corso…');
@@ -471,7 +474,9 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         job.cost = costSince(current, current.rentedAt);
       }
     }
-    set('done', 100, `Addestramento completato: ${job.clips} frasi (${job.minutes} min) · modello salvato in ${repo} (privato) · `
+    set('done', 100, `Addestramento completato: ${job.clips} frasi (${job.minutes} min) · `
+      + (job.bestEpoch ? `salvata l'epoca ${job.bestEpoch} (fedeltà ${Math.round(job.fidelity * 100)}%) · ` : '')
+      + `modello in ${repo} (privato) · `
       + (job.destroyed ? `GPU distrutta, costo $${job.cost}.` : `controlla su cloud.vast.ai che l’istanza sia distrutta.`));
   }
 

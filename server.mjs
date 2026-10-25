@@ -258,20 +258,27 @@ const server = createServer(async (req, res) => {
       if (!hf.canWrite) return send(res, 400, { error: 'Il token Hugging Face deve avere il permesso di scrittura (Write).' });
       const files = (await listTrainingFiles()).map((file) => ({ ...file, path: join(TRAINING, file.name) }));
       if (!files.length) return send(res, 400, { error: 'Aggiungi almeno una registrazione della tua voce.' });
-      if ((await listVoices()).length >= MAX_VOICES) return send(res, 400, { error: `Hai già ${MAX_VOICES} voci: eliminane una per fare spazio a quella addestrata.` });
       const voiceName = safeName(input.voiceName) || 'Voce addestrata';
       const speaker = voiceName.toLowerCase().normalize('NFD').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 32) || 'voce';
       const repo = `${hf.user}/clova-voice-${speaker.replace(/_/g, '-')}`;
+      // Retraining under the same name overwrites the HF repo: reuse that voice instead of adding one.
+      let existingId = null;
+      for (const voice of await listVoices()) {
+        const profile = JSON.parse(await readFile(join(VOICES, voice.id, 'profile.json'), 'utf8'));
+        if (profile.type === 'trained' && profile.repo === repo) existingId = voice.id;
+      }
+      if (!existingId && (await listVoices()).length >= MAX_VOICES) return send(res, 400, { error: `Hai già ${MAX_VOICES} voci: eliminane una per fare spazio a quella addestrata.` });
       try {
         const job = cloud.startTraining({
-          files, repo, speaker, epochs: Math.min(10, Math.max(1, Number(input.epochs) || 3)),
+          files, repo, speaker, epochs: Math.min(10, Math.max(1, Number(input.epochs) || 5)),
           maxRate: Math.min(5, Math.max(0.2, Number(input.hourlyRate) || 1)),
           onTrained: async (result) => {
-            const id = randomUUID();
+            const id = existingId || randomUUID();
             await mkdir(join(VOICES, id), { recursive: true });
             await writeFile(join(VOICES, id, 'profile.json'), JSON.stringify({
               id, name: voiceName, type: 'trained', repo: result.repo, speaker: result.speaker,
-              createdAt: new Date().toISOString(), size: 0, clips: result.clips, minutes: result.minutes
+              createdAt: new Date().toISOString(), size: 0, clips: result.clips, minutes: result.minutes,
+              bestEpoch: result.bestEpoch ?? null, fidelity: result.fidelity ?? null
             }, null, 2));
           }
         });
