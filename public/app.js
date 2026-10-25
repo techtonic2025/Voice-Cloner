@@ -133,7 +133,8 @@ $('generateButton').addEventListener('click', async () => {
   const payload = {
     voiceId, text: text.value, language: $('language').value, characters: text.value.length,
     hourlyRate: Number($('rate').value), minutes: Number($('minutes').value), safetyMinutes: 10,
-    budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked, pause: Number($('pause').value)
+    budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked, pause: Number($('pause').value),
+    keepAlive: document.querySelector('input[name="lifecycle"]:checked').value === 'keep'
   };
   try {
     const response = await fetch('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
@@ -162,5 +163,54 @@ $('generateButton').addEventListener('click', async () => {
     setBusy(false);
   }
 });
+
+// Kept-alive GPU: always-visible banner with countdown, cost and a destroy button.
+let instance = { active: false };
+
+function renderInstance() {
+  $('instanceBanner').hidden = !instance.active;
+  if (!instance.active) return;
+  const parts = [instance.gpu, `spesa $${instance.cost.toFixed(3)}`];
+  if (instance.busy || !instance.keepUntil) parts.push('in uso');
+  else {
+    const left = Math.max(0, Math.round((instance.keepUntil - Date.now()) / 1000));
+    parts.push(`si distrugge da sola tra ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`);
+  }
+  $('instanceInfo').textContent = `· ${parts.join(' · ')}`;
+}
+
+async function pollInstance() {
+  try {
+    const response = await fetch('/api/instance');
+    if (response.ok) instance = await response.json();
+  } catch { /* Server closed: keep the last state. */ }
+  renderInstance();
+}
+
+$('destroyInstanceButton').addEventListener('click', async () => {
+  const message = instance.busy ? 'C’è una generazione in corso: verrà interrotta. Distruggere la GPU?' : 'Distruggere subito la GPU?';
+  if (!confirm(message)) return;
+  $('destroyInstanceButton').disabled = true;
+  $('destroyInstanceButton').textContent = 'Distruzione in corso…';
+  try {
+    const response = await fetch('/api/instance/destroy', { method: 'POST' });
+    const data = await response.json();
+    if (!data.destroyed) alert('Non riesco a confermare la distruzione: controlla su cloud.vast.ai.');
+  } finally {
+    $('destroyInstanceButton').disabled = false;
+    $('destroyInstanceButton').textContent = 'Distruggi istanza';
+    pollInstance();
+  }
+});
+
+window.addEventListener('beforeunload', (event) => {
+  if (!instance.active) return;
+  event.preventDefault();
+  event.returnValue = 'Attenzione: la GPU è ancora attiva.';
+});
+
+pollInstance();
+setInterval(pollInstance, 3000);
+setInterval(renderInstance, 1000);
 
 loadVoices().catch((error) => { $('voiceList').innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`; });

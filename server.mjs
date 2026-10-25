@@ -140,7 +140,7 @@ const server = createServer(async (req, res) => {
       const language = ['Italian', 'English', 'Spanish', 'French'].includes(input.language) ? input.language : 'Italian';
       const pause = Math.min(2, Math.max(0, Number(input.pause) || 0.35));
       try {
-        const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text, language, maxRate, budgetCap, pause });
+        const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text, language, maxRate, budgetCap, pause, keepAlive: input.keepAlive === true });
         return send(res, 202, { id: job.id, cost });
       } catch (error) { return send(res, 409, { error: error.message }); }
     }
@@ -163,6 +163,8 @@ const server = createServer(async (req, res) => {
       }
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/instance') return send(res, 200, cloud.instanceStatus());
+    if (req.method === 'POST' && url.pathname === '/api/instance/destroy') return send(res, 200, { destroyed: await cloud.destroyInstance() });
     if (req.method === 'GET' && url.pathname === '/api/instances') return send(res, 200, { active: await cloud.activeInstanceIds() });
     if (req.method === 'POST' && url.pathname === '/api/cleanup') return send(res, 200, { destroyed: await cloud.cleanupOrphans() });
     return staticFile(req, res);

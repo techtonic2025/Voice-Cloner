@@ -1,4 +1,4 @@
-// Vast AI orchestration: rent a GPU, run one Qwen job, download, always destroy.
+// Vast AI orchestration: rent a GPU, run Qwen jobs, download, always destroy.
 import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -12,6 +12,9 @@ const IMAGE = process.env.CLOVA_WORKER_IMAGE || 'ghcr.io/techtonic2025/clova-voi
 const IMAGE_LOGIN = process.env.CLOVA_IMAGE_LOGIN || '';
 const BOOT_TIMEOUT_MS = 20 * 60_000;
 const LOAD_TIMEOUT_MS = 10 * 60_000;
+const KEEP_ALIVE_MS = Number(process.env.CLOVA_KEEP_ALIVE_MS) || 5 * 60_000;
+// Bump when the worker changes how it prepares the reference, so old clips are redone.
+const CLIP_VERSION = 2;
 
 export function createCloud({ root, voicesDir }) {
   const outputsDir = join(root, 'outputs');
@@ -111,7 +114,52 @@ export function createCloud({ root, voicesDir }) {
     return instance.public_ipaddr && port ? `http://${instance.public_ipaddr.trim()}:${port}` : null;
   }
 
-  function startJob({ voice, text, language, maxRate, budgetCap, pause }) {
+  // The rented GPU. With "keep alive" it survives KEEP_ALIVE_MS after a job so the
+  // next generation skips boot and model load. It is destroyed on that timer, by the
+  // "Distruggi istanza" button, on any error, and on app shutdown.
+  let session = null;
+  let lastDestroy = null;
+
+  function costSince(current, from) {
+    return +((Date.now() - from) / 3_600_000 * current.rate).toFixed(4);
+  }
+
+  async function endSession() {
+    const current = session;
+    if (!current) return true;
+    session = null;
+    clearTimeout(current.idleTimer);
+    const destroyed = await destroy(current.instanceId);
+    lastDestroy = { instanceId: current.instanceId, destroyed, at: Date.now(), cost: costSince(current, current.rentedAt) };
+    return destroyed;
+  }
+
+  function keepWarm(current) {
+    current.keepUntil = Date.now() + KEEP_ALIVE_MS;
+    current.idleTimer = setTimeout(() => { if (session === current && !running) endSession(); }, KEEP_ALIVE_MS);
+  }
+
+  function workerFetch(current, path, options = {}) {
+    return fetch(`${current.address}${path}`, {
+      ...options, headers: { authorization: `Bearer ${current.token}`, ...(options.headers || {}) }
+    });
+  }
+
+  // Reuse the kept-alive GPU if it still answers; otherwise destroy it.
+  async function warmSession() {
+    const current = session;
+    if (!current?.address) return null;
+    clearTimeout(current.idleTimer);
+    current.keepUntil = null;
+    try {
+      const health = await (await workerFetch(current, '/health', { signal: AbortSignal.timeout(8000) })).json();
+      if (health.ready) return current;
+    } catch { /* Unreachable: replaced below. */ }
+    await endSession();
+    return null;
+  }
+
+  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive }) {
     if (running) throw new Error('C’è già una generazione in corso. Attendi o annullala.');
     const job = {
       id: randomUUID(), status: 'searching', percent: 2, detail: 'Cerco una GPU adatta…',
@@ -124,84 +172,99 @@ export function createCloud({ root, voicesDir }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    run(job, controller.signal, { voice, text, language, maxRate, pause })
+    run(job, controller.signal, { voice, text, language, maxRate, pause, keepAlive })
       .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
       .finally(() => { clearTimeout(watchdog); running = null; });
     return job;
   }
 
-  async function run(job, signal, { voice, text, language, maxRate, pause }) {
+  async function rent(job, signal, { maxRate, characters }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
-    let instanceId = null;
-    let rentedAt = 0;
+    const offers = await searchOffers(maxRate, characters);
+    if (!offers.length) throw new Error(`Nessuna GPU veloce disponibile sotto $${maxRate}/ora. Alza la tariffa massima e riprova.`);
+
+    const token = randomBytes(24).toString('hex');
+    for (const offer of offers.slice(0, 4)) {
+      signal.throwIfAborted();
+      set('creating', 6, `Noleggio ${offer.gpu_name} · rete ${(offer.inet_down / 1000).toFixed(1)} Gbit/s · $${offer.dph_total.toFixed(3)}/ora · tempo stimato ~${Math.ceil(offer.estimatedSeconds / 60)} min…`);
+      try {
+        // 24 GB+ cards fit twice as many chunks per batch.
+        const batchSize = offer.gpu_ram >= 23000 ? 8 : 4;
+        const created = await vast(`/asks/${offer.id}/`, {
+          method: 'PUT', signal,
+          body: {
+            client_id: 'me', image: IMAGE, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
+            disk: 40, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}`,
+            ...(IMAGE_LOGIN ? { image_login: IMAGE_LOGIN } : {})
+          }
+        });
+        // Registered immediately so any later failure still destroys it.
+        session = { instanceId: created.new_contract, token, gpu: offer.gpu_name, rate: offer.dph_total, rentedAt: Date.now(), address: null, keepUntil: null };
+        await track(session.instanceId);
+        break;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        console.warn(`Offerta ${offer.id} non disponibile: ${error.message}`);
+      }
+    }
+    if (!session) throw new Error('Nessuna delle GPU trovate ha accettato il noleggio. Riprova tra poco.');
+    const current = session;
+    Object.assign(job, { instanceId: current.instanceId, gpu: current.gpu, rate: current.rate });
+
+    // 1. Wait for the container (image pull is the slow part).
+    const bootDeadline = Date.now() + BOOT_TIMEOUT_MS;
+    while (!current.address) {
+      if (Date.now() > bootDeadline) throw new Error('La GPU non si è avviata in tempo.');
+      await sleep(5000, signal);
+      job.cost = costSince(current, current.rentedAt);
+      const { instances: instance } = await vast(`/instances/${current.instanceId}/`, { signal });
+      const elapsed = Math.round((Date.now() - current.rentedAt) / 1000);
+      set('booting', Math.min(38, 10 + elapsed / 15), `Avvio GPU e download del worker (${elapsed}s)… ${instance?.status_msg ? `· ${String(instance.status_msg).slice(0, 80)}` : ''}`);
+      if (instance?.actual_status === 'running') current.address = workerAddress(instance);
+    }
+
+    // 2. Wait for Qwen and Whisper to load into VRAM.
+    const loadDeadline = Date.now() + LOAD_TIMEOUT_MS;
+    for (;;) {
+      if (Date.now() > loadDeadline) throw new Error('Il modello non si è caricato in tempo.');
+      job.cost = costSince(current, current.rentedAt);
+      set('loading', 42, 'Caricamento di Qwen in memoria GPU…');
+      try {
+        const health = await (await workerFetch(current, '/health', { signal })).json();
+        if (health.error) throw new Error(`Worker: ${health.error}`);
+        if (health.ready) { job.attention = health.attention; break; }
+      } catch (error) {
+        if (signal.aborted || error.message.startsWith('Worker:')) throw error;
+      }
+      await sleep(3000, signal);
+    }
+    return current;
+  }
+
+  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive }) {
+    const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
+    let current = null;
+    let success = false;
+    let costFrom = Date.now();
     try {
-      const offers = await searchOffers(maxRate, text.length);
-      if (!offers.length) throw new Error(`Nessuna GPU veloce disponibile sotto $${maxRate}/ora. Alza la tariffa massima e riprova.`);
-
-      const token = randomBytes(24).toString('hex');
-      for (const offer of offers.slice(0, 4)) {
-        signal.throwIfAborted();
-        set('creating', 6, `Noleggio ${offer.gpu_name} · rete ${(offer.inet_down / 1000).toFixed(1)} Gbit/s · $${offer.dph_total.toFixed(3)}/ora · tempo stimato ~${Math.ceil(offer.estimatedSeconds / 60)} min…`);
+      current = await warmSession();
+      if (current) {
+        Object.assign(job, { instanceId: current.instanceId, gpu: current.gpu, rate: current.rate, reused: true });
+      } else {
         try {
-          // 24 GB+ cards fit twice as many chunks per batch.
-          const batchSize = offer.gpu_ram >= 23000 ? 8 : 4;
-          const created = await vast(`/asks/${offer.id}/`, {
-            method: 'PUT', signal,
-            body: {
-              client_id: 'me', image: IMAGE, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
-              disk: 40, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}`,
-              ...(IMAGE_LOGIN ? { image_login: IMAGE_LOGIN } : {})
-            }
-          });
-          instanceId = created.new_contract;
-          rentedAt = Date.now();
-          await track(instanceId);
-          Object.assign(job, { instanceId, gpu: offer.gpu_name, rate: offer.dph_total });
-          break;
+          current = await rent(job, signal, { maxRate, characters: text.length });
         } catch (error) {
-          if (signal.aborted) throw error;
-          console.warn(`Offerta ${offer.id} non disponibile: ${error.message}`);
+          current = session;
+          throw error;
         }
+        costFrom = current.rentedAt;
       }
-      if (!instanceId) throw new Error('Nessuna delle GPU trovate ha accettato il noleggio. Riprova tra poco.');
-      const updateCost = () => { job.cost = +((Date.now() - rentedAt) / 3_600_000 * job.rate).toFixed(4); };
+      const worker = (path, options = {}) => workerFetch(current, path, { ...options, signal });
+      const updateCost = () => { job.cost = costSince(current, costFrom); };
 
-      // 1. Wait for the container (image pull is the slow part).
-      let address = null;
-      const bootDeadline = Date.now() + BOOT_TIMEOUT_MS;
-      while (!address) {
-        if (Date.now() > bootDeadline) throw new Error('La GPU non si è avviata in tempo.');
-        await sleep(5000, signal);
-        updateCost();
-        const { instances: instance } = await vast(`/instances/${instanceId}/`, { signal });
-        const elapsed = Math.round((Date.now() - rentedAt) / 1000);
-        set('booting', Math.min(38, 10 + elapsed / 15), `Avvio GPU e download del worker (${elapsed}s)… ${instance?.status_msg ? `· ${String(instance.status_msg).slice(0, 80)}` : ''}`);
-        if (instance?.actual_status === 'running') address = workerAddress(instance);
-      }
-
-      const worker = (path, options = {}) => fetch(`${address}${path}`, {
-        ...options, signal, headers: { authorization: `Bearer ${token}`, ...(options.headers || {}) }
-      });
-
-      // 2. Wait for Qwen and Whisper to load into VRAM.
-      const loadDeadline = Date.now() + LOAD_TIMEOUT_MS;
-      for (;;) {
-        if (Date.now() > loadDeadline) throw new Error('Il modello non si è caricato in tempo.');
-        updateCost();
-        set('loading', 42, 'Caricamento di Qwen in memoria GPU…');
-        try {
-          const health = await (await worker('/health')).json();
-          if (health.error) throw new Error(`Worker: ${health.error}`);
-          if (health.ready) { job.attention = health.attention; break; }
-        } catch (error) {
-          if (signal.aborted || error.message.startsWith('Worker:')) throw error;
-        }
-        await sleep(3000, signal);
-      }
-
-      // 3. Submit the job. A cached short clip + transcript skips Whisper entirely.
-      set('uploading', 48, 'Invio della voce e del testo…');
-      const useClip = Boolean(voice.clipFilename && voice.referenceText);
+      // 3. Submit the job. A cached full-sample clip + transcript skips Whisper entirely.
+      set('uploading', 48, job.reused ? 'GPU già accesa: invio subito voce e testo…' : 'Invio della voce e del testo…');
+      const useClip = Boolean(voice.clipFilename && voice.referenceText && voice.clipVersion === CLIP_VERSION);
       const referenceFile = join(voicesDir, voice.id, useClip ? voice.clipFilename : voice.filename);
       const form = new FormData();
       form.append('reference', new Blob([await readFile(referenceFile)], { type: useClip ? 'audio/wav' : voice.contentType }), useClip ? 'reference.wav' : voice.filename);
@@ -224,7 +287,7 @@ export function createCloud({ root, voicesDir }) {
         if (remote.status === 'generating' && remote.total) {
           set('generating', 50 + Math.round((remote.done / remote.total) * 40), `Sintesi con la tua voce: blocco ${remote.done} di ${remote.total}`);
         } else {
-          set('generating', 50, remote.status === 'preparing' ? 'Scelgo il pezzo migliore del campione e lo trascrivo…' : 'In coda…');
+          set('generating', 50, remote.status === 'preparing' ? 'Preparo il campione completo e lo trascrivo (solo la prima volta)…' : 'In coda…');
         }
       }
 
@@ -243,21 +306,31 @@ export function createCloud({ root, voicesDir }) {
         await download('reference-clip.wav', join(voicesDir, voice.id, 'reference-clip.wav'));
         const profilePath = join(voicesDir, voice.id, 'profile.json');
         const profile = JSON.parse(await readFile(profilePath, 'utf8'));
-        await writeFile(profilePath, JSON.stringify({ ...profile, clipFilename: 'reference-clip.wav', referenceText: remote.reference_text }, null, 2));
+        await writeFile(profilePath, JSON.stringify({ ...profile, clipFilename: 'reference-clip.wav', referenceText: remote.reference_text, clipVersion: CLIP_VERSION }, null, 2));
       }
       updateCost();
       Object.assign(job, { files: { full: `/api/jobs/${job.id}/files/clova-voice.wav`, parts: `/api/jobs/${job.id}/files/clova-voice-blocchi.zip` }, chunks: remote.total, audioSeconds: remote.seconds });
+      success = true;
     } finally {
-      if (instanceId) {
-        set(job.files ? 'destroying' : job.status, job.files ? 97 : job.percent, 'Distruzione della GPU e del suo disco…');
-        job.destroyed = await destroy(instanceId);
-        job.cost = +((Date.now() - rentedAt) / 3_600_000 * job.rate).toFixed(4);
-        if (!job.destroyed) job.detail = `Non riesco a confermare la distruzione dell’istanza ${instanceId}: controlla su cloud.vast.ai.`;
+      if (current && session === current) {
+        if (success && keepAlive) {
+          keepWarm(current);
+          job.keptUntil = current.keepUntil;
+        } else {
+          set(job.files ? 'destroying' : job.status, job.files ? 97 : job.percent, 'Distruzione della GPU e del suo disco…');
+          job.destroyed = await endSession();
+          if (!job.destroyed) job.detail = `Non riesco a confermare la distruzione dell’istanza ${current.instanceId}: controlla su cloud.vast.ai.`;
+        }
+        job.cost = costSince(current, costFrom);
+      } else if (current) {
+        // Destroyed meanwhile by the button.
+        job.destroyed = lastDestroy?.instanceId === current.instanceId ? lastDestroy.destroyed : true;
       }
     }
-    set('done', 100, job.destroyed
-      ? `Fatto: ${job.chunks} blocchi, ${job.audioSeconds}s di audio. GPU distrutta, costo stimato $${job.cost}.`
-      : `Audio pronto, ma ${job.detail}`);
+    const summary = `Fatto: ${job.chunks} blocchi, ${job.audioSeconds}s di audio, costo stimato $${job.cost}.`;
+    set('done', 100, job.keptUntil
+      ? `${summary} GPU ancora accesa per 5 minuti: puoi generare di nuovo senza attendere l’avvio.`
+      : job.destroyed ? `${summary} GPU distrutta.` : `Audio pronto, ma ${job.detail}`);
   }
 
   function publicJob(job) {
@@ -266,18 +339,32 @@ export function createCloud({ root, voicesDir }) {
     return rest;
   }
 
+  function instanceStatus() {
+    if (!session) return { active: false, lastDestroy };
+    return {
+      active: true, instanceId: session.instanceId, gpu: session.gpu, rate: session.rate,
+      ready: Boolean(session.address), busy: Boolean(running), keepUntil: session.keepUntil,
+      cost: costSince(session, session.rentedAt)
+    };
+  }
+
+  async function destroyInstance() {
+    running?.cancel?.();
+    return endSession();
+  }
+
   return {
-    outputsDir, cleanupOrphans, startJob,
+    outputsDir, cleanupOrphans, startJob, instanceStatus, destroyInstance,
     getJob: (id) => publicJob(jobs.get(id)),
     cancelJob: (id) => { jobs.get(id)?.cancel?.(); return Boolean(jobs.get(id)); },
     activeInstanceIds: readActive,
-    destroyAll: async () => { running?.cancel?.(); for (const id of await readActive()) await destroy(id); }
+    destroyAll: async () => { await destroyInstance(); for (const id of await readActive()) await destroy(id); }
   };
 }
 
 // Rough end-to-end time per offer, used only to rank them: pulling and unpacking
-// the ~9 GB image dominates short jobs, GPU speed (dlperf) dominates long ones.
-const IMAGE_MB = 9000;
+// the ~10 GB image dominates short jobs, GPU speed (dlperf) dominates long ones.
+const IMAGE_MB = 10500;
 const EXCLUDED_GPUS = /^CMP /; // Mining cards: high dlperf score, crippled bf16.
 
 export function rankOffers(offers, characters) {

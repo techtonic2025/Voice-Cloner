@@ -7,6 +7,10 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div class="instance-banner" id="instanceBanner" hidden role="alert">
+      <span><b>⚠ GPU attiva</b> <span id="instanceInfo"></span></span>
+      <button type="button" id="destroyInstanceButton">Distruggi istanza</button>
+    </div>
     <main>
       <section class="hero">
         <span class="pill">Le tue voci, sul tuo PC</span>
@@ -25,7 +29,7 @@
             <label>Nome della voce<input id="voiceName" type="text" maxlength="60" placeholder="Es. Enzo Ufficiale" /></label>
             <label>Campione vocale<input id="reference" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/ogg" /><small>Consigliati 30–120 secondi; massimo 75 MB.</small></label>
           </div>
-          <p class="helper">Non devi trascrivere nulla: alla prima generazione l’app sceglie da sola i 15 secondi più puliti e li trascrive, poi li riusa (più veloce).</p>
+          <p class="helper">Non devi trascrivere nulla: alla prima generazione l’app usa tutto il campione (fino a 2 minuti, senza silenzi ai bordi), lo trascrive e poi riusa la trascrizione.</p>
           <button type="button" id="saveVoiceButton">Salva questa voce</button>
         </div>
         <section class="progress-panel" id="profileProgress" hidden aria-live="polite">
@@ -44,7 +48,12 @@
           <label>Lingua<select id="language"><option value="Italian">Italiano</option><option value="English">English</option><option value="Spanish">Español</option><option value="French">Français</option></select><small>Usa la lingua del testo.</small></label>
         </div>
         <details><summary>Impostazioni avanzate</summary><div class="two details"><label>Tariffa GPU massima/ora (USD)<input id="rate" type="number" min="0.05" step="0.01" value="0.80" /><small>L’app sceglie la GPU che finisce prima (rete, disco e potenza), non la più economica. Con 0,80 rientrano RTX 4090, L40S, RTX 6000 Ada.</small></label><label>Tempo GPU previsto (minuti)<input id="minutes" type="number" min="5" step="1" value="15" /><small>Include avvio e download del worker.</small></label><label>Pausa tra i blocchi (secondi)<input id="pause" type="number" min="0" max="2" step="0.05" value="0.35" /></label></div></details>
-        <label class="check"><input id="destroy" type="checkbox" /> Confermo: distruggi l’istanza e il suo disco alla fine, anche in caso di errore.</label>
+        <fieldset class="lifecycle">
+          <legend>Quando ha finito</legend>
+          <label class="check"><input type="radio" name="lifecycle" value="destroy" checked /> Distruggi subito la GPU</label>
+          <label class="check"><input type="radio" name="lifecycle" value="keep" /> Tienila accesa 5 minuti per altre generazioni (riparte subito, senza attendere l’avvio)</label>
+        </fieldset>
+        <label class="check"><input id="destroy" type="checkbox" /> Confermo: la GPU e il suo disco verranno distrutti automaticamente (a fine lavoro o dopo 5 minuti), anche in caso di errore.</label>
         <div class="actions"><button type="button" id="generateButton">Genera con la voce selezionata</button><button type="button" id="cancelButton" class="secondary" hidden>Annulla e distruggi la GPU</button></div>
         <section class="progress-panel" id="jobProgress" hidden aria-live="polite">
           <div class="progress-heading"><strong id="jobTitle">Preparazione</strong><b id="jobPercent">0%</b></div>
@@ -55,7 +64,7 @@
 
       <section class="card result" id="result" hidden></section>
       <section class="card result" id="audioOutput" hidden><h2>Audio pronto</h2><audio id="player" controls></audio><p class="downloads"><a id="downloadAudio" class="download">File unico (WAV)</a><a id="downloadParts" class="download">Più file, un blocco per frase (ZIP)</a></p><p class="muted" id="outputInfo"></p></section>
-      <section class="note"><b>Come funziona:</b> i profili vocali restano nella cartella dell’app. A ogni generazione viene noleggiata una GPU Vast, la voce viene sintetizzata, i file vengono scaricati sul PC e la GPU viene distrutta. Se chiudi l’app a metà, la GPU viene distrutta alla chiusura o al riavvio successivo.</section>
+      <section class="note"><b>Come funziona:</b> i profili vocali restano nella cartella dell’app. A ogni generazione viene noleggiata una GPU Vast, la voce viene sintetizzata, i file vengono scaricati sul PC e la GPU viene distrutta, subito o dopo 5 minuti se scegli di tenerla accesa. Il tasto “Distruggi istanza” in alto la spegne quando vuoi. Se chiudi l’app a metà, la GPU viene distrutta alla chiusura o al riavvio successivo.</section>
     </main>
     <script src="/app.js"></script>
   </body>

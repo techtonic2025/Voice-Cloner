@@ -6,6 +6,7 @@ submits a job to /jobs, polls /jobs/{id} and finally downloads the files.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -30,15 +31,18 @@ TRANSCRIBER: WhisperModel | None = None
 LOAD_ERROR: str | None = None
 GPU_LOCK = threading.Lock()
 MODEL_PATH = os.getenv("QWEN_MODEL_PATH", "/models/qwen3-tts-1.7b-base")
-WHISPER_MODEL_PATH = os.getenv("WHISPER_MODEL_PATH", "/models/faster-whisper-small")
+WHISPER_MODEL_PATH = os.getenv("WHISPER_MODEL_PATH", "/models/faster-whisper-large-v3-turbo")
 JOB_TOKEN = os.getenv("CLOVA_JOB_TOKEN", "")
 BATCH_SIZE = max(1, int(os.getenv("CLOVA_BATCH_SIZE", "4")))
 MAX_TEXT_CHARS = 60_000
-CHUNK_CHARS = 280
-# Qwen clones best from a short clean clip: longer references only slow every chunk.
-REF_MIN_SECONDS, REF_TARGET_SECONDS, REF_MAX_SECONDS = 6.0, 15.0, 20.0
+CHUNK_CHARS = 400
+# A long reference (up to ~2 min) gave clearly better likeness than a 15 s clip,
+# so keep as much of the sample as possible and only trim silence or overflow.
+REF_MIN_SECONDS, REF_TARGET_SECONDS, REF_MAX_SECONDS = 6.0, 120.0, 120.0
 WORK_DIR = Path(tempfile.gettempdir()) / "clova-jobs"
 JOBS: dict[str, dict] = {}
+# Voice prompts by reference hash: a warm instance reuses them across jobs.
+PROMPTS: dict[str, object] = {}
 LANGUAGE_CODES = {"Italian": "it", "English": "en", "Spanish": "es", "French": "fr"}
 
 
@@ -89,7 +93,7 @@ def read_audio(path: Path) -> tuple[np.ndarray, int]:
 
 
 def prepare_reference(source: Path, language: str, folder: Path) -> tuple[Path, str]:
-    """Pick the best 6-20 s stretch of speech and transcribe it for Qwen."""
+    """Keep the longest clean stretch of speech (up to 2 min) and transcribe it for Qwen."""
     segments, _ = TRANSCRIBER.transcribe(
         str(source), language=LANGUAGE_CODES.get(language), vad_filter=True, beam_size=5
     )
@@ -158,9 +162,14 @@ def run_job(job_id: str, source: Path, reference_text: str, text: str, language:
                 reference, reference_text = prepare_reference(source, language, folder)
                 job["prepared_reference"] = True
             job["reference_text"] = reference_text
-            prompt = MODEL.create_voice_clone_prompt(
-                ref_audio=str(reference), ref_text=reference_text, x_vector_only_mode=False
-            )
+            key = hashlib.sha1(reference.read_bytes() + reference_text.encode()).hexdigest()
+            prompt = PROMPTS.get(key)
+            if prompt is None:
+                prompt = MODEL.create_voice_clone_prompt(
+                    ref_audio=str(reference), ref_text=reference_text, x_vector_only_mode=False
+                )
+                PROMPTS.clear()
+                PROMPTS[key] = prompt
 
             chunks = split_text(text)
             job.update(status="generating", total=len(chunks), done=0)
