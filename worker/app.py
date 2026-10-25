@@ -39,9 +39,9 @@ JOB_TOKEN = os.getenv("CLOVA_JOB_TOKEN", "")
 BATCH_SIZE = max(1, int(os.getenv("CLOVA_BATCH_SIZE", "4")))
 MAX_TEXT_CHARS = 60_000
 CHUNK_CHARS = 400
-# A long reference (up to ~2 min) gave clearly better likeness than a 15 s clip,
-# so keep as much of the sample as possible and only trim silence or overflow.
-REF_MIN_SECONDS, REF_TARGET_SECONDS, REF_MAX_SECONDS = 6.0, 120.0, 120.0
+# A long reference (up to ~2 min) gives better likeness of the timbre, a shorter
+# one can keep a more native accent on new text: the length is chosen per job.
+REF_MIN_SECONDS, REF_MAX_SECONDS = 6.0, 120.0
 WORK_DIR = Path(tempfile.gettempdir()) / "clova-jobs"
 JOBS: dict[str, dict] = {}
 # Voice prompts by reference hash: a warm instance reuses them across jobs.
@@ -95,8 +95,10 @@ def read_audio(path: Path) -> tuple[np.ndarray, int]:
         return audio.astype("float32"), rate
 
 
-def prepare_reference(source: Path, language: str, folder: Path) -> tuple[Path, str]:
-    """Keep the longest clean stretch of speech (up to 2 min) and transcribe it for Qwen."""
+def prepare_reference(source: Path, language: str, folder: Path,
+                      target_seconds: float = REF_MAX_SECONDS) -> tuple[Path, str]:
+    """Keep the clean stretch of speech closest to target_seconds, cut on Whisper
+    segment boundaries (whole phrases), and transcribe it for Qwen."""
     segments, _ = TRANSCRIBER.transcribe(
         str(source), language=LANGUAGE_CODES.get(language), vad_filter=True, beam_size=5
     )
@@ -108,11 +110,11 @@ def prepare_reference(source: Path, language: str, folder: Path) -> tuple[Path, 
     for i in range(len(segments)):
         for j in range(i, len(segments)):
             duration = segments[j].end - segments[i].start
-            if duration > REF_MAX_SECONDS:
+            if duration > target_seconds * 1.15:
                 break
             window = segments[i:j + 1]
             confidence = sum(s.avg_logprob for s in window) / len(window)
-            score = -abs(REF_TARGET_SECONDS - duration) + 6 * confidence
+            score = -abs(target_seconds - duration) + 6 * confidence
             if duration < REF_MIN_SECONDS:
                 score -= 10
             if score > best_score:
@@ -228,16 +230,20 @@ def take_score(wav: np.ndarray, sample_rate: int, target: str, language: str) ->
 
 
 def run_job(job_id: str, source: Path, reference_text: str, text: str, language: str, pause: float,
-            temperature: float, top_p: float, takes: int, pronunciations: list[list[str]], speed: float) -> None:
+            temperature: float, top_p: float, takes: int, pronunciations: list[list[str]], speed: float,
+            ref_seconds: float) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     try:
         with GPU_LOCK:
             job["status"] = "preparing"
             reference = source
-            if not reference_text:
-                reference, reference_text = prepare_reference(source, language, folder)
-                job["prepared_reference"] = True
+            full_length = ref_seconds >= REF_MAX_SECONDS
+            if not reference_text or not full_length:
+                # Only the full-length clip is cached by the app; shorter ones are cut
+                # (and transcribed) from whatever was sent, every time.
+                reference, reference_text = prepare_reference(source, language, folder, ref_seconds)
+                job["prepared_reference"] = full_length
             job["reference_text"] = reference_text
             key = hashlib.sha1(reference.read_bytes() + reference_text.encode()).hexdigest()
             prompt = PROMPTS.get(key)
@@ -333,6 +339,7 @@ async def create_job(
     takes: int = Form(1),
     pronunciations: str = Form("[]"),
     speed: float = Form(1.0),
+    ref_seconds: float = Form(REF_MAX_SECONDS),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -361,7 +368,8 @@ async def create_job(
     threading.Thread(
         target=run_job,
         args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5),
-              min(max(top_p, 0), 1), min(max(takes, 1), 3), entries, min(max(speed, 0.7), 1.3)),
+              min(max(top_p, 0), 1), min(max(takes, 1), 3), entries, min(max(speed, 0.7), 1.3),
+              min(max(ref_seconds, 10.0), REF_MAX_SECONDS)),
         daemon=True,
     ).start()
     return {"id": job_id}

@@ -25,8 +25,15 @@ function renderVoices(selectedId = $('voiceSelect').value) {
   if (!voices.length) {
     list.innerHTML = '<p class="muted">Non hai ancora salvato una voce.</p>';
   } else {
-    list.innerHTML = voices.map((voice) => `<div class="voice-row"><div><b>${escapeHtml(voice.name)}</b><small>Profilo locale · ${bytes(voice.size)}${voice.prepared ? ' · campione ottimizzato' : ' · verrà ottimizzato alla prima generazione'}</small></div><button class="delete-voice" data-id="${voice.id}" type="button">Elimina</button></div>`).join('');
+    list.innerHTML = voices.map((voice) => `<div class="voice-row"><div><b>${escapeHtml(voice.name)}</b><small>Profilo locale · ${bytes(voice.size)}${voice.prepared ? ' · campione ottimizzato' : ' · verrà ottimizzato alla prima generazione'}</small></div><div class="actions">${voice.prepared ? `<button class="ghost transcript-voice" data-id="${voice.id}" type="button">Trascrizione</button>` : ''}<button class="delete-voice" data-id="${voice.id}" type="button">Elimina</button></div></div>
+      <div class="transcript-panel" id="transcript-${voice.id}" hidden>
+        <p class="helper">Questo è il testo che Qwen abbina al tuo campione. Deve corrispondere <b>parola per parola</b> a ciò che dici nella registrazione: correggi eventuali errori di Whisper.</p>
+        <textarea rows="7"></textarea>
+        <div class="actions"><button class="ghost save-transcript" data-id="${voice.id}" type="button">Salva trascrizione</button><span class="muted"></span></div>
+      </div>`).join('');
     list.querySelectorAll('.delete-voice').forEach((button) => button.addEventListener('click', () => deleteVoice(button.dataset.id)));
+    list.querySelectorAll('.transcript-voice').forEach((button) => button.addEventListener('click', () => toggleTranscript(button.dataset.id)));
+    list.querySelectorAll('.save-transcript').forEach((button) => button.addEventListener('click', () => saveTranscript(button.dataset.id)));
   }
   voices.forEach((voice) => {
     const option = document.createElement('option');
@@ -36,6 +43,27 @@ function renderVoices(selectedId = $('voiceSelect').value) {
     select.append(option);
   });
   $('newVoicePanel').hidden = voices.length >= 3;
+}
+
+async function toggleTranscript(id) {
+  const panel = $(`transcript-${id}`);
+  panel.hidden = !panel.hidden;
+  if (panel.hidden) return;
+  const response = await fetch(`/api/voices/${id}/transcript`);
+  const data = await response.json();
+  panel.querySelector('textarea').value = response.ok ? data.text : '';
+  panel.querySelector('.muted').textContent = response.ok ? '' : data.error;
+}
+
+async function saveTranscript(id) {
+  const panel = $(`transcript-${id}`);
+  const status = panel.querySelector('.muted');
+  status.textContent = 'Salvataggio…';
+  const response = await fetch(`/api/voices/${id}/transcript`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: panel.querySelector('textarea').value })
+  });
+  const data = await response.json();
+  status.textContent = response.ok ? 'Salvata: vale dalla prossima generazione.' : data.error;
 }
 
 function escapeHtml(value) {
@@ -135,7 +163,7 @@ $('generateButton').addEventListener('click', async () => {
     hourlyRate: Number($('rate').value), minutes: Number($('minutes').value), safetyMinutes: 10,
     budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked, pause: Number($('pause').value),
     keepAlive: document.querySelector('input[name="lifecycle"]:checked').value === 'keep',
-    stability: $('stability').value, quality: $('quality').value, speed: Number($('speed').value)
+    stability: $('stability').value, quality: $('quality').value, speed: Number($('speed').value), refLength: $('refLength').value
   };
   try {
     const response = await fetch('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });

@@ -143,7 +143,7 @@ async function historyEntry(id) {
   return {
     id, createdAt: meta.createdAt || new Date(audio.mtimeMs).toISOString(),
     voiceName: meta.voiceName || null, text: meta.text || null, language: meta.language || null,
-    stability: meta.stability || null, takes: meta.takes || null, speed: meta.speed || null, chunks: meta.chunks ?? null,
+    stability: meta.stability || null, takes: meta.takes || null, speed: meta.speed || null, refSeconds: meta.refSeconds || null, chunks: meta.chunks ?? null,
     // 16-bit mono 24 kHz WAV: 48,000 bytes per second after the 44-byte header.
     audioSeconds: meta.audioSeconds ?? +((audio.size - 44) / 48_000).toFixed(1),
     quality: meta.quality ?? null, weakest: meta.weakest || [], cost: meta.cost ?? null,
@@ -206,6 +206,23 @@ const server = createServer(async (req, res) => {
       return send(res, 201, { voice: { id, name, createdAt: profile.createdAt, size: profile.size } });
     }
 
+    // Transcript of the cached reference clip: Qwen pairs it word by word with the
+    // audio, so a Whisper mistake here hurts pronunciation on every generation.
+    const transcriptMatch = url.pathname.match(/^\/api\/voices\/([a-f0-9-]{36})\/transcript$/i);
+    if (transcriptMatch) {
+      const profilePath = join(VOICES, transcriptMatch[1], 'profile.json');
+      const profile = JSON.parse(await readFile(profilePath, 'utf8').catch(() => 'null'));
+      if (!profile) return send(res, 404, { error: 'Voce non trovata.' });
+      if (req.method === 'GET') return send(res, 200, { text: profile.referenceText || '', prepared: Boolean(profile.referenceText) });
+      if (req.method === 'PUT') {
+        const value = String((await body(req)).text || '').replace(/\s+/g, ' ').trim();
+        if (!profile.referenceText) return send(res, 400, { error: 'La trascrizione si crea alla prima generazione con questa voce.' });
+        if (value.length < 10) return send(res, 400, { error: 'Trascrizione troppo corta.' });
+        await writeFile(profilePath, JSON.stringify({ ...profile, referenceText: value }, null, 2));
+        return send(res, 200, { ok: true });
+      }
+    }
+
     const deleteMatch = url.pathname.match(/^\/api\/voices\/([a-f0-9-]{36})$/i);
     if (req.method === 'DELETE' && deleteMatch) {
       await rm(join(VOICES, deleteMatch[1]), { recursive: true, force: true });
@@ -233,6 +250,7 @@ const server = createServer(async (req, res) => {
           stability: ['natural', 'stable', 'very'].includes(input.stability) ? input.stability : 'stable',
           takes: input.quality === 'high' ? 3 : 1,
           speed: Math.min(1.3, Math.max(0.7, Number(input.speed) || 1)),
+          refSeconds: { short: 20, medium: 40 }[input.refLength] || 120,
           pronunciations: language === 'Italian' ? parsePronunciations(await readPronunciations()) : [] });
         return send(res, 202, { id: job.id, cost });
       } catch (error) { return send(res, 409, { error: error.message }); }
