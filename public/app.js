@@ -205,15 +205,62 @@ function duration(seconds) {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
-function renderHistory(entries) {
+const styleLabels = { photo: 'foto realistica', illustration: 'illustrazione', free: 'stile libero' };
+
+function imageHistoryItem(entry, base, when) {
+  const shots = entry.images.map((name, index) => `<figure><a href="${base}/${name}" target="_blank" rel="noopener"><img src="${base}/${name}" alt="" loading="lazy" /></a>
+    <figcaption><span>seed ${entry.seeds[index] ?? '?'}</span><a href="${base}/${name}?download">Scarica</a></figcaption></figure>`).join('');
+  const meta = [`${entry.images.length} ${entry.images.length === 1 ? 'immagine' : 'immagini'}`, entry.width ? `${entry.width}×${entry.height}` : null,
+    styleLabels[entry.style] || null, entry.cost != null ? `$${entry.cost}` : null, bytes(entry.bytes)].filter(Boolean).join(' · ');
+  return `<article class="history-item">
+    <div class="history-head"><b>Immagini</b><span>${when}</span></div>
+    <p class="history-text">${escapeHtml(entry.prompt.length > 220 ? `${entry.prompt.slice(0, 220)}…` : entry.prompt)}</p>
+    <div class="history-meta">${meta}</div>
+    <div class="gallery">${shots}</div>
+    <div class="actions">
+      <a class="download" href="${base}/immagini.zip?download">Tutte (ZIP)</a>
+      <button type="button" class="ghost" data-reuse-prompt="${entry.id}">Riusa il prompt</button>
+      <button type="button" class="secondary" data-delete="${entry.id}">Elimina</button>
+    </div>
+  </article>`;
+}
+
+function percent(value) {
+  return value == null ? '–' : `${Math.round(value * 100)}%`;
+}
+
+function trainingHistoryItem(entry, base, when) {
+  const players = (label) => [1, 2].map((n) => entry.samples.includes(`${label}-${n}.wav`)
+    ? `<audio controls preload="none" src="${base}/${label}-${n}.wav"></audio>` : '').join('');
+  const epochs = Object.keys(entry.epochScores).sort((a, b) => Number(a) - Number(b));
+  const rows = [
+    `<tr><td><b>La tua voce vera</b></td><td>–</td><td>riferimento</td><td>${players('vera')}</td></tr>`,
+    entry.baseline ? `<tr><td>Clonazione al volo</td><td>${percent(entry.baseline.fidelity)}</td><td>${percent(entry.baseline.similarity)}</td><td>${players('clone')}</td></tr>` : '',
+    ...epochs.map((n) => {
+      const score = entry.epochScores[n];
+      return `<tr class="${Number(n) === entry.bestEpoch ? 'best' : ''}"><td>Epoca ${n}${Number(n) === entry.bestEpoch ? ' ★ salvata' : ''}</td><td>${percent(score.fidelity)}</td><td>${percent(score.similarity)}</td><td>${players(`epoca-${String(n).padStart(2, '0')}`)}</td></tr>`;
+    })
+  ].join('');
+  return `<article class="history-item">
+    <div class="history-head"><b>Addestramento · ${escapeHtml(entry.repo || '')}</b><span>${when}</span></div>
+    <div class="history-meta">${entry.clips} frasi (${entry.minutes} min) · ${entry.epochs} epoche · somiglianza misurata con WavLM rispetto alla tua voce vera</div>
+    <div class="table-wrap"><table class="epochs"><thead><tr><th></th><th>Fedeltà al testo</th><th>Somiglianza a te</th><th>Ascolta</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="actions"><button type="button" class="secondary" data-delete="${entry.id}">Elimina</button></div>
+  </article>`;
+}
+
+function renderHistory(allEntries) {
   const list = $('historyList');
+  const entries = allEntries.filter((entry) => (currentTab === 'image' ? entry.kind === 'images' : entry.kind !== 'images'));
   if (!entries.length) {
-    list.innerHTML = '<p class="muted">Ancora nessuna generazione.</p>';
+    list.innerHTML = `<p class="muted">Ancora nessuna ${currentTab === 'image' ? 'immagine' : 'generazione vocale'}.</p>`;
     return;
   }
   list.innerHTML = entries.map((entry) => {
     const base = `/api/jobs/${entry.id}/files`;
     const when = new Date(entry.createdAt).toLocaleString('it-IT', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    if (entry.kind === 'images') return imageHistoryItem(entry, base, when);
+    if (entry.kind === 'training') return trainingHistoryItem(entry, base, when);
     const preview = entry.text
       ? `<p class="history-text">${escapeHtml(entry.text.length > 220 ? `${entry.text.slice(0, 220)}…` : entry.text)}</p>`
       : '<p class="history-text missing">Testo non salvato (generazione precedente alla cronologia).</p>';
@@ -244,6 +291,13 @@ function renderHistory(entries) {
     updateCharacters();
     text.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }));
+  list.querySelectorAll('[data-reuse-prompt]').forEach((button) => button.addEventListener('click', () => {
+    const entry = entries.find((item) => item.id === button.dataset.reusePrompt);
+    $('imagePrompt').value = entry.prompt;
+    if (entry.style) $('imageStyle').value = entry.style;
+    if (entry.format) $('imageFormat').value = entry.format;
+    $('imagePrompt').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }));
   list.querySelectorAll('[data-delete]').forEach((button) => button.addEventListener('click', async () => {
     if (!confirm('Eliminare definitivamente questa generazione dal PC?')) return;
     const response = await fetch(`/api/history/${button.dataset.delete}`, { method: 'DELETE' });
@@ -252,14 +306,82 @@ function renderHistory(entries) {
   }));
 }
 
+let historyEntries = [];
 async function loadHistory() {
   try {
     const response = await fetch('/api/history');
-    if (response.ok) renderHistory((await response.json()).entries);
+    if (response.ok) historyEntries = (await response.json()).entries;
   } catch { /* Server closed: keep the current list. */ }
+  renderHistory(historyEntries);
 }
 
+// Tabs: #voice and #image, so each section can be shown (and filmed) on its own.
+let currentTab = 'voice';
+function showTab() {
+  currentTab = location.hash === '#image' ? 'image' : 'voice';
+  $('tab-voice').hidden = currentTab !== 'voice';
+  $('tab-image').hidden = currentTab !== 'image';
+  $('heroWord').textContent = currentTab === 'image' ? 'Image' : 'Voice';
+  $('heroPill').textContent = currentTab === 'image' ? 'Le tue immagini, senza abbonamenti' : 'Le tue voci, sul tuo PC';
+  $('heroText').textContent = currentTab === 'image'
+    ? 'Foto realistiche e illustrazioni con FLUX su una GPU noleggiata al minuto: descrivi l’immagine, scegli formato e varianti, scarica.'
+    : 'Clona la tua voce da un campione o addestrala sulle tue registrazioni. Scegli la voce, incolla un testo e genera il tuo voice-over.';
+  document.querySelectorAll('.tabs a').forEach((link) => link.classList.toggle('active', link.dataset.tab === currentTab));
+  renderHistory(historyEntries);
+}
+window.addEventListener('hashchange', showTab);
+showTab();
 loadHistory();
+
+// Image generation with FLUX.
+const imageTitles = { searching: 'Ricerca GPU', creating: 'Noleggio GPU', booting: 'Avvio GPU', loading: 'Preparazione FLUX', uploading: 'Invio richiesta', generating: 'Generazione', downloading: 'Download', destroying: 'Distruzione GPU', done: 'Completato', error: 'Errore' };
+let imageJob = null;
+
+$('imageButton').addEventListener('click', async () => {
+  $('imageOutput').hidden = true;
+  const payload = {
+    prompt: $('imagePrompt').value, style: $('imageStyle').value, format: $('imageFormat').value,
+    count: Number($('imageCount').value), quality: $('imageQuality').value, seed: $('imageSeed').value,
+    confirmDestroy: $('imageConfirm').checked, keepAlive: document.querySelector('input[name="imageLifecycle"]:checked').value === 'keep'
+  };
+  const response = await fetch('/api/images', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+  const data = await response.json();
+  if (!response.ok) return alert(data.error);
+  imageJob = data.id;
+  $('imageButton').disabled = true;
+  $('imageCancel').hidden = false;
+  $('imageProgress').hidden = false;
+  try {
+    for (;;) {
+      const { job } = await (await fetch(`/api/jobs/${imageJob}`)).json();
+      $('imageTitle').textContent = imageTitles[job.status] || job.status;
+      $('imagePercent').textContent = `${Math.round(job.percent)}%`;
+      $('imageBar').style.width = `${job.percent}%`;
+      const cost = job.rate ? ` · ${job.gpu} · spesa $${job.cost.toFixed(3)}` : '';
+      $('imageDetail').textContent = (job.status === 'error' ? `${job.error}${job.instanceId ? (job.destroyed ? ' · GPU distrutta.' : '') : ''}` : job.detail) + cost;
+      if (job.status === 'done') {
+        const base = `/api/jobs/${job.id}/files`;
+        $('imageGallery').innerHTML = job.images.map((name, index) => `<figure><a href="${base}/${name}" target="_blank" rel="noopener"><img src="${base}/${name}" alt="" /></a>
+          <figcaption><span>seed ${job.seeds[index]}</span><a href="${base}/${name}?download">Scarica</a></figcaption></figure>`).join('');
+        $('imageZip').href = `${base}/immagini.zip?download`;
+        $('imageInfo').textContent = `${job.images.length} immagini · ${job.width}×${job.height} · costo GPU stimato $${job.cost}`;
+        $('imageOutput').hidden = false;
+        loadHistory();
+        break;
+      }
+      if (job.status === 'error') break;
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+  } finally {
+    imageJob = null;
+    $('imageButton').disabled = false;
+    $('imageCancel').hidden = true;
+  }
+});
+
+$('imageCancel').addEventListener('click', async () => {
+  if (imageJob && confirm('Annullare? La GPU verrà distrutta.')) await fetch(`/api/jobs/${imageJob}/cancel`, { method: 'POST' });
+});
 
 // Pronunciation dictionary, saved in data/pronunce.txt and applied on the server.
 async function loadPronunciations() {

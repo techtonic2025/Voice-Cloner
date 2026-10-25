@@ -17,11 +17,14 @@
     </div>
     <main>
       <section class="hero">
-        <span class="pill">Le tue voci, sul tuo PC</span>
-        <h1>Clova <em>Voice</em></h1>
-        <p>Clona la tua voce da un campione o addestrala sulle tue registrazioni. Scegli la voce, incolla un testo e genera il tuo voice-over.</p>
+        <span class="pill" id="heroPill">Le tue voci, sul tuo PC</span>
+        <h1>Clova <em id="heroWord">Voice</em></h1>
+        <p id="heroText">Clona la tua voce da un campione o addestrala sulle tue registrazioni. Scegli la voce, incolla un testo e genera il tuo voice-over.</p>
       </section>
 
+      <nav class="tabs" aria-label="Sezioni"><a href="#voice" data-tab="voice">🎙 Voce</a><a href="#image" data-tab="image">🖼 Immagini</a></nav>
+
+      <div id="tab-voice" class="tab">
       <section class="warning"><strong>Solo la tua voce o una voce autorizzata.</strong> I campioni restano salvati sul tuo PC. La GPU temporanea verrà distrutta al termine del lavoro.</section>
 
       <section class="card form" id="profileCard">
@@ -103,6 +106,39 @@
 
       <section class="card result" id="result" hidden></section>
       <section class="card result" id="audioOutput" hidden><h2>Audio pronto</h2><audio id="player" controls></audio><p class="downloads"><a id="downloadAudio" class="download">File unico (WAV)</a><a id="downloadParts" class="download">Più file, un blocco per frase (ZIP)</a></p><p class="muted" id="outputInfo"></p></section>
+      </div>
+
+      <div id="tab-image" class="tab" hidden>
+        <section class="warning"><strong>Usa le immagini in modo responsabile.</strong> Nessun contenuto con minori, nessuna persona reale senza consenso. FLUX.1 [dev] è per uso personale e non commerciale.</section>
+        <section class="card form" id="imageCard">
+          <div class="heading"><h2>Genera immagini</h2><p>Descrivi cosa vuoi vedere. FLUX capisce meglio l’inglese, ma funziona anche in italiano.</p></div>
+          <label>Descrizione<textarea id="imagePrompt" rows="5" placeholder="Es. a cozy home studio with a microphone and orange neon lights, evening"></textarea></label>
+          <div class="two">
+            <label>Stile<select id="imageStyle"><option value="photo">Foto realistica</option><option value="illustration">Illustrazione</option><option value="free">Libero (solo la tua descrizione)</option></select></label>
+            <label>Formato<select id="imageFormat"><option value="wide">16:9 orizzontale (miniatura YouTube)</option><option value="square" selected>1:1 quadrato</option><option value="tall">9:16 verticale (Shorts, Reels)</option><option value="portrait">4:5 ritratto (post Instagram)</option></select></label>
+          </div>
+          <div class="two">
+            <label>Varianti<select id="imageCount"><option value="1">1</option><option value="2">2</option><option value="4" selected>4</option></select></label>
+            <label>Qualità<select id="imageQuality"><option value="fast">Veloce (20 passi)</option><option value="normal" selected>Normale (28 passi)</option><option value="max">Massima (40 passi)</option></select></label>
+          </div>
+          <label>Seed (facoltativo)<input id="imageSeed" type="number" min="0" step="1" placeholder="Vuoto = casuale. Riusa il seed di un’immagine per rifarla con piccole modifiche." /></label>
+          <fieldset class="lifecycle">
+            <legend>Quando ha finito</legend>
+            <label class="check"><input type="radio" name="imageLifecycle" value="keep" checked /> Tienila accesa 5 minuti (le immagini successive partono subito)</label>
+            <label class="check"><input type="radio" name="imageLifecycle" value="destroy" /> Distruggi subito la GPU</label>
+          </fieldset>
+          <label class="check"><input id="imageConfirm" type="checkbox" /> Confermo: la GPU e il suo disco verranno distrutti automaticamente (a fine lavoro o dopo 5 minuti), anche in caso di errore.</label>
+          <p class="helper">Serve una GPU da almeno 45 GB (circa 0,50–0,80 $/ora). La prima volta la GPU scarica FLUX (circa 34 GB): avvio di qualche minuto. Poi ogni immagine richiede pochi secondi.</p>
+          <div class="actions"><button type="button" id="imageButton">Genera immagini</button><button type="button" id="imageCancel" class="secondary" hidden>Annulla e distruggi la GPU</button></div>
+          <section class="progress-panel" id="imageProgress" hidden aria-live="polite">
+            <div class="progress-heading"><strong id="imageTitle">Preparazione</strong><b id="imagePercent">0%</b></div>
+            <div class="progress-track"><span id="imageBar"></span></div>
+            <p id="imageDetail"></p>
+          </section>
+        </section>
+        <section class="card result" id="imageOutput" hidden><h2>Immagini pronte</h2><div class="gallery" id="imageGallery"></div><p class="downloads"><a id="imageZip" class="download">Scarica tutte (ZIP)</a></p><p class="muted" id="imageInfo"></p></section>
+      </div>
+
       <section class="card result" id="historyCard">
         <div class="heading"><h2>Cronologia</h2><p>Ogni generazione resta salvata sul PC finché non la elimini.</p></div>
         <div class="history-list" id="historyList"><p class="muted">Caricamento…</p></div>

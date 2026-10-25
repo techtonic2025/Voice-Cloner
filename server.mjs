@@ -133,17 +133,40 @@ function parsePronunciations(source) {
     .sort((a, b) => b[0].length - a[0].length);
 }
 
+// Image presets: the style is appended to the user's prompt (FLUX follows English best);
+// formats are FLUX-friendly sizes around one megapixel, multiples of 16.
+const IMAGE_STYLES = {
+  photo: ', photorealistic photograph, natural lighting, sharp focus, highly detailed, 35mm',
+  illustration: ', detailed digital illustration, clean lines, rich colors, professional artwork',
+  free: ''
+};
+const IMAGE_FORMATS = { wide: [1344, 768], square: [1024, 1024], tall: [768, 1344], portrait: [896, 1120] };
+
 // History: every finished generation lives in outputs/<id>/ (audio, zip, meta.json).
 // Folders from before meta.json existed are listed with what can be read from disk.
 async function historyEntry(id) {
   const folder = join(cloud.outputsDir, id);
+  let meta = {};
+  try { meta = JSON.parse(await readFile(join(folder, 'meta.json'), 'utf8')); } catch { /* Older generation. */ }
+  if (meta.kind === 'training') {
+    return {
+      id, kind: 'training', createdAt: meta.createdAt, repo: meta.repo, clips: meta.clips, minutes: meta.minutes,
+      epochs: meta.epochs, bestEpoch: meta.bestEpoch, baseline: meta.baseline, epochScores: meta.epochScores || {}, samples: meta.samples || []
+    };
+  }
+  if (meta.kind === 'images') {
+    const sizes = await Promise.all([...(meta.images || []), 'immagini.zip'].map((name) => stat(join(folder, name)).then((s) => s.size, () => 0)));
+    return {
+      id, kind: 'images', createdAt: meta.createdAt, prompt: meta.prompt, style: meta.style, format: meta.format,
+      width: meta.width, height: meta.height, seeds: meta.seeds || [], images: meta.images || [], cost: meta.cost ?? null,
+      bytes: sizes.reduce((sum, size) => sum + size, 0)
+    };
+  }
   const audio = await stat(join(folder, 'clova-voice.wav')).catch(() => null);
   if (!audio) return null;
   const parts = await stat(join(folder, 'clova-voice-blocchi.zip')).catch(() => null);
-  let meta = {};
-  try { meta = JSON.parse(await readFile(join(folder, 'meta.json'), 'utf8')); } catch { /* Older generation. */ }
   return {
-    id, createdAt: meta.createdAt || new Date(audio.mtimeMs).toISOString(),
+    id, kind: 'voice', createdAt: meta.createdAt || new Date(audio.mtimeMs).toISOString(),
     voiceName: meta.voiceName || null, text: meta.text || null, language: meta.language || null,
     stability: meta.stability || null, takes: meta.takes || null, speed: meta.speed || null, refSeconds: meta.refSeconds || null, chunks: meta.chunks ?? null,
     // 16-bit mono 24 kHz WAV: 48,000 bytes per second after the 44-byte header.
@@ -193,12 +216,14 @@ function safeFileName(value) {
 }
 
 async function staticFile(req, res) {
-  const requested = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+  const path = req.url.split('?')[0];
+  const requested = path === '/' ? '/index.html' : path;
   const file = normalize(join(PUBLIC, requested));
   if (!file.startsWith(PUBLIC)) return send(res, 403, { error: 'Percorso non valido.' });
   try {
     const contents = await readFile(file);
-    res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream' });
+    // no-cache: after an update the browser must re-check, or it keeps showing the old page.
+    res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream', 'cache-control': 'no-cache' });
     res.end(contents);
   } catch { send(res, 404, { error: 'File non trovato.' }); }
 }
@@ -361,7 +386,29 @@ const server = createServer(async (req, res) => {
       } catch (error) { return send(res, 409, { error: error.message }); }
     }
 
-    const jobMatch = url.pathname.match(/^\/api\/jobs\/([a-f0-9-]{36})(\/cancel|\/files\/(clova-voice\.wav|clova-voice-blocchi\.zip))?$/i);
+    if (req.method === 'POST' && url.pathname === '/api/images') {
+      const input = await body(req);
+      if (!input.confirmDestroy) return send(res, 400, { error: 'Per proseguire devi confermare la distruzione automatica dell’istanza.' });
+      const prompt = String(input.prompt || '').trim().slice(0, 2000);
+      if (!prompt) return send(res, 400, { error: 'Descrivi l’immagine da generare.' });
+      if (!(await readHf()).token) return send(res, 400, { error: 'Serve il token Hugging Face (riquadro “Addestra la tua voce”) e la licenza di FLUX.1-dev accettata su Hugging Face.' });
+      const style = IMAGE_STYLES[input.style] ? input.style : 'photo';
+      const format = IMAGE_FORMATS[input.format] ? input.format : 'square';
+      const [width, height] = IMAGE_FORMATS[format];
+      const seed = Number.isInteger(Number(input.seed)) && String(input.seed).trim() !== '' ? Math.max(0, Number(input.seed)) : -1;
+      try {
+        const job = cloud.startImageJob({
+          prompt, fullPrompt: prompt + IMAGE_STYLES[style], style, format, width, height,
+          count: Math.min(4, Math.max(1, Number(input.count) || 1)), seed,
+          steps: { fast: 20, normal: 28, max: 40 }[input.quality] || 28,
+          maxRate: Math.min(5, Math.max(0.2, Number(input.hourlyRate) || 1)),
+          budgetCap: Math.max(0.1, Number(input.budgetCap) || 1), keepAlive: input.keepAlive === true
+        });
+        return send(res, 202, { id: job.id });
+      } catch (error) { return send(res, 409, { error: error.message }); }
+    }
+
+    const jobMatch = url.pathname.match(/^\/api\/jobs\/([a-f0-9-]{36})(\/cancel|\/files\/(clova-voice\.wav|clova-voice-blocchi\.zip|img-[1-4]\.png|immagini\.zip|(?:vera|clone|epoca-\d{2})-[12]\.wav))?$/i);
     if (jobMatch) {
       // Files are served straight from outputs/, so history entries keep working after a restart.
       if (req.method === 'GET' && jobMatch[3]) {
@@ -372,9 +419,12 @@ const server = createServer(async (req, res) => {
         const when = new Date(entry?.createdAt || info.mtimeMs);
         const pad = (value) => String(value).padStart(2, '0');
         const stamp = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}_${pad(when.getHours())}-${pad(when.getMinutes())}`;
-        const filename = jobMatch[3].endsWith('.zip') ? `clova-${stamp}-blocchi.zip` : `clova-${stamp}.wav`;
+        const name = jobMatch[3];
+        const filename = name === 'clova-voice.wav' ? `clova-${stamp}.wav` : name === 'clova-voice-blocchi.zip' ? `clova-${stamp}-blocchi.zip`
+          : name === 'immagini.zip' ? `clova-${stamp}-immagini.zip` : `clova-${stamp}-${name.replace('img-', 'immagine-')}`;
+        const type = name.endsWith('.zip') ? 'application/zip' : name.endsWith('.png') ? 'image/png' : 'audio/wav';
         res.writeHead(200, {
-          'content-type': jobMatch[3].endsWith('.zip') ? 'application/zip' : 'audio/wav', 'content-length': info.size,
+          'content-type': type, 'content-length': info.size,
           ...(url.searchParams.has('download') ? { 'content-disposition': `attachment; filename="${filename}"` } : {})
         });
         return createReadStream(file).pipe(res);

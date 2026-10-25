@@ -9,9 +9,15 @@ import { pipeline } from 'node:stream/promises';
 const VAST = process.env.CLOVA_VAST_API || 'https://console.vast.ai/api/v0';
 const LABEL_PREFIX = 'clova-voice-';
 const IMAGE = process.env.CLOVA_WORKER_IMAGE || 'ghcr.io/techtonic2025/clova-voice-qwen:latest';
+const IMAGE_FLUX = process.env.CLOVA_IMAGE_WORKER || 'ghcr.io/techtonic2025/clova-image-flux:latest';
 const IMAGE_LOGIN = process.env.CLOVA_IMAGE_LOGIN || '';
+// What each kind of worker needs from a GPU. imageMB is the Docker image, extraMB what
+// the worker downloads at startup (FLUX weights), workSeconds a rough per-job GPU time.
+const WORKERS = {
+  voice: { image: IMAGE, minGpuRam: 16_000, disk: 40, imageMB: 10_500, extraMB: 0, loadMB: 4_500, loadTimeoutMs: 10 * 60_000 },
+  images: { image: IMAGE_FLUX, minGpuRam: 45_000, disk: 90, imageMB: 7_000, extraMB: 34_000, loadMB: 34_000, loadTimeoutMs: 30 * 60_000 }
+};
 const BOOT_TIMEOUT_MS = 20 * 60_000;
-const LOAD_TIMEOUT_MS = 10 * 60_000;
 const KEEP_ALIVE_MS = Number(process.env.CLOVA_KEEP_ALIVE_MS) || 5 * 60_000;
 // Bump when the worker changes how it prepares the reference, so old clips are redone.
 const CLIP_VERSION = 2;
@@ -105,7 +111,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
   }
 
   // compute_cap 800-900 = Ampere/Ada: Blackwell (1200) is not supported by torch 2.6 + flash-attn 2.7.
-  async function searchOffers(maxRate, characters, minGpuRam = 16000) {
+  async function searchOffers(maxRate, characters, minGpuRam, profile) {
     const data = await vast('/bundles/', {
       method: 'POST',
       body: {
@@ -113,13 +119,13 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
         num_gpus: { eq: 1 }, gpu_ram: { gte: minGpuRam }, compute_cap: { gte: 800, lte: 900 },
         cuda_max_good: { gte: 12.6 }, reliability: { gte: 0.98 },
-        inet_down: { gte: 1000 }, disk_bw: { gte: 1000 }, disk_space: { gte: 40 }, direct_port_count: { gte: 1 },
+        inet_down: { gte: 1000 }, disk_bw: { gte: 1000 }, disk_space: { gte: profile.disk }, direct_port_count: { gte: 1 },
         dph_total: { lte: maxRate }, order: [['dlperf', 'desc']]
       }
     });
     const offers = Array.isArray(data.offers) ? data.offers : data.offers ? [data.offers] : [];
     const badHosts = new Set(await readBadHosts());
-    return rankOffers(offers.filter((offer) => !badHosts.has(offer.machine_id)), characters);
+    return rankOffers(offers.filter((offer) => !badHosts.has(offer.machine_id)), characters, profile);
   }
 
   function workerAddress(instance) {
@@ -160,8 +166,13 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
   }
 
   // Reuse the kept-alive GPU if it still answers; otherwise destroy it.
-  async function warmSession() {
+  async function warmSession(kind = 'voice') {
     const current = session;
+    if (current && current.kind !== kind) {
+      // A kept-alive GPU of the other kind (voice vs images) runs a different worker.
+      await endSession();
+      return null;
+    }
     if (!current?.address) return null;
     clearTimeout(current.idleTimer);
     current.keepUntil = null;
@@ -192,9 +203,10 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     return job;
   }
 
-  async function rent(job, signal, { maxRate, characters, minGpuRam }) {
+  async function rent(job, signal, { maxRate, characters, minGpuRam, kind = 'voice' }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
-    const offers = await searchOffers(maxRate, characters, minGpuRam);
+    const profile = WORKERS[kind];
+    const offers = await searchOffers(maxRate, characters, minGpuRam || profile.minGpuRam, profile);
     // Needed on the GPU to download private fine-tuned models and to upload new ones.
     const hfToken = await getHfToken();
     if (!offers.length) throw new Error(`Nessuna GPU veloce disponibile sotto $${maxRate}/ora. Alza la tariffa massima e riprova.`);
@@ -214,13 +226,13 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         const created = await vast(`/asks/${offer.id}/`, {
           method: 'PUT', signal,
           body: {
-            client_id: 'me', image: IMAGE, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
-            disk: 40, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
+            client_id: 'me', image: profile.image, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
+            disk: profile.disk, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
             ...(IMAGE_LOGIN ? { image_login: IMAGE_LOGIN } : {})
           }
         });
         // Registered immediately so any later failure still destroys it.
-        session = { instanceId: created.new_contract, token, gpu: offer.gpu_name, rate: offer.dph_total, rentedAt: Date.now(), address: null, keepUntil: null };
+        session = { instanceId: created.new_contract, kind, token, gpu: offer.gpu_name, rate: offer.dph_total, rentedAt: Date.now(), address: null, keepUntil: null };
         await track(session.instanceId);
       } catch (error) {
         if (signal.aborted) throw error;
@@ -260,16 +272,20 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         : 'Nessuna delle GPU trovate ha accettato il noleggio. Riprova tra poco.');
     }
 
-    // 2. Wait for Qwen and Whisper to load into VRAM.
-    const loadDeadline = Date.now() + LOAD_TIMEOUT_MS;
+    // 2. Wait for the models to load (the image worker first downloads FLUX).
+    const loadDeadline = Date.now() + profile.loadTimeoutMs;
     for (;;) {
       if (Date.now() > loadDeadline) throw new Error('Il modello non si è caricato in tempo.');
       job.cost = costSince(current, current.rentedAt);
-      set('loading', 42, 'Caricamento di Qwen in memoria GPU…');
       try {
         const health = await (await workerFetch(current, '/health', { signal })).json();
         if (health.error) throw new Error(`Worker: ${health.error}`);
         if (health.ready) { job.attention = health.attention; break; }
+        if (health.phase === 'downloading' && health.download != null) {
+          set('loading', 38 + Math.round(health.download * 8), `Download di FLUX da Hugging Face: ${Math.round(health.download * 100)}%…`);
+        } else {
+          set('loading', 46, kind === 'images' ? 'Caricamento di FLUX in memoria GPU…' : 'Caricamento di Qwen in memoria GPU…');
+        }
       } catch (error) {
         if (signal.aborted || error.message.startsWith('Worker:')) throw error;
       }
@@ -284,7 +300,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     let success = false;
     let costFrom = Date.now();
     try {
-      current = await warmSession();
+      current = await warmSession('voice');
       if (current) {
         Object.assign(job, { instanceId: current.instanceId, gpu: current.gpu, rate: current.rate, reused: true });
       } else {
@@ -458,13 +474,28 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         if (remote.status === 'error') throw new Error(remote.error);
         Object.assign(job, {
           clips: remote.clips, minutes: remote.minutes, dropped: remote.dropped, loss: remote.loss, epoch: remote.epoch, epochs: remote.epochs,
-          epochScores: remote.epoch_scores, bestEpoch: remote.best_epoch, fidelity: remote.fidelity
+          epochScores: remote.epoch_scores, baseline: remote.baseline, bestEpoch: remote.best_epoch, fidelity: remote.fidelity, similarity: remote.similarity
         });
         if (remote.status === 'done') break;
         const percent = remote.phase === 'training' ? 60 + Math.round(35 * (remote.epoch || 0) / (remote.epochs || epochs)) : base[remote.phase] ?? 46;
         set('training', percent, remote.detail || 'In corso…');
       }
       Object.assign(job, { repo, speaker });
+      // Keep the test sentences of every epoch next to the real voice, for listening.
+      if (remote.samples?.length) {
+        set('training', 97, 'Download dei campioni di confronto…');
+        const folder = join(outputsDir, job.id);
+        await mkdir(folder, { recursive: true });
+        for (const name of remote.samples) {
+          const response = await worker(`/train/${submittedData.id}/samples/${name}`);
+          if (response.ok) await pipeline(Readable.fromWeb(response.body), createWriteStream(join(folder, name)));
+        }
+        await writeFile(join(folder, 'meta.json'), JSON.stringify({
+          id: job.id, kind: 'training', createdAt: new Date(job.startedAt).toISOString(), repo, speaker,
+          clips: job.clips, minutes: job.minutes, epochs, bestEpoch: job.bestEpoch, baseline: job.baseline,
+          epochScores: job.epochScores, samples: remote.samples
+        }, null, 2));
+      }
       await onTrained?.(job);
       job.trained = true;
     } finally {
@@ -475,9 +506,108 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       }
     }
     set('done', 100, `Addestramento completato: ${job.clips} frasi (${job.minutes} min) · `
-      + (job.bestEpoch ? `salvata l'epoca ${job.bestEpoch} (fedeltà ${Math.round(job.fidelity * 100)}%) · ` : '')
+      + (job.bestEpoch ? `salvata l'epoca ${job.bestEpoch} (fedeltà ${Math.round(job.fidelity * 100)}%, somiglianza ${Math.round((job.similarity ?? 0) * 100)}%) · ` : '')
       + `modello in ${repo} (privato) · `
       + (job.destroyed ? `GPU distrutta, costo $${job.cost}.` : `controlla su cloud.vast.ai che l’istanza sia distrutta.`));
+  }
+
+  // Images: FLUX on a 45 GB+ GPU, same keep-alive and destruction rules as voice jobs.
+  function startImageJob({ prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, budgetCap, keepAlive }) {
+    if (running) throw new Error('C’è già un lavoro in corso. Attendi o annullalo.');
+    const job = {
+      id: randomUUID(), kind: 'images', status: 'searching', percent: 2, detail: 'Cerco una GPU da almeno 45 GB…',
+      startedAt: Date.now(), cost: 0, images: null, error: null
+    };
+    const controller = new AbortController();
+    const maxMs = Math.max(10, (budgetCap / maxRate) * 60) * 60_000;
+    const watchdog = setTimeout(() => controller.abort(new Error('Tempo massimo raggiunto per il budget scelto.')), maxMs);
+    job.cancel = () => controller.abort(new Error('Generazione annullata.'));
+    jobs.set(job.id, job);
+    running = job;
+    runImages(job, controller.signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive })
+      .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
+      .finally(() => { clearTimeout(watchdog); running = null; });
+    return job;
+  }
+
+  async function runImages(job, signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive }) {
+    const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
+    let current = null;
+    let success = false;
+    let costFrom = Date.now();
+    try {
+      current = await warmSession('images');
+      if (current) {
+        Object.assign(job, { instanceId: current.instanceId, gpu: current.gpu, rate: current.rate, reused: true });
+      } else {
+        try {
+          current = await rent(job, signal, { maxRate, characters: 0, kind: 'images' });
+        } catch (error) {
+          current = session;
+          throw error;
+        }
+        costFrom = current.rentedAt;
+      }
+      const worker = (path, options = {}) => workerFetch(current, path, { ...options, signal });
+
+      set('uploading', 50, job.reused ? 'GPU già accesa: invio subito la richiesta…' : 'Invio della richiesta…');
+      const form = new FormData();
+      form.append('prompt', fullPrompt);
+      form.append('width', String(width));
+      form.append('height', String(height));
+      form.append('count', String(count));
+      form.append('seed', String(seed ?? -1));
+      form.append('steps', String(steps));
+      const submitted = await worker('/images', { method: 'POST', body: form });
+      const submittedData = await submitted.json();
+      if (!submitted.ok) throw new Error(submittedData.detail || 'Il worker ha rifiutato la richiesta.');
+
+      let remote;
+      for (;;) {
+        await sleep(2500, signal);
+        job.cost = costSince(current, costFrom);
+        remote = await (await worker(`/images/${submittedData.id}`)).json();
+        if (remote.status === 'error') throw new Error(remote.error);
+        if (remote.status === 'done') break;
+        set('generating', 55 + Math.round(((remote.done || 0) / (remote.total || count)) * 35),
+          `Generazione con FLUX: immagine ${Math.min((remote.done || 0) + 1, remote.total || count)} di ${remote.total || count}…`);
+      }
+
+      set('downloading', 92, 'Download delle immagini…');
+      const folder = join(outputsDir, job.id);
+      await mkdir(folder, { recursive: true });
+      const names = [...Array.from({ length: remote.total }, (_, i) => `img-${i + 1}.png`), 'immagini.zip'];
+      for (const name of names) {
+        const response = await worker(`/images/${submittedData.id}/files/${name}`);
+        if (!response.ok) throw new Error(`Download di ${name} non riuscito.`);
+        await pipeline(Readable.fromWeb(response.body), createWriteStream(join(folder, name)));
+      }
+      job.cost = costSince(current, costFrom);
+      Object.assign(job, { images: names.filter((name) => name.endsWith('.png')), seeds: remote.seeds, width: remote.width, height: remote.height });
+      // Saved next to the files so the history survives app restarts.
+      await writeFile(join(folder, 'meta.json'), JSON.stringify({
+        id: job.id, kind: 'images', createdAt: new Date(job.startedAt).toISOString(), prompt, style, format,
+        width: remote.width, height: remote.height, steps, seeds: remote.seeds, images: job.images, gpu: job.gpu, cost: job.cost
+      }, null, 2));
+      success = true;
+    } finally {
+      if (current && session === current) {
+        if (success && keepAlive) {
+          keepWarm(current);
+          job.keptUntil = current.keepUntil;
+        } else {
+          set(success ? 'destroying' : job.status, success ? 97 : job.percent, 'Distruzione della GPU e del suo disco…');
+          job.destroyed = await endSession();
+        }
+        job.cost = costSince(current, costFrom);
+      } else if (current) {
+        job.destroyed = lastDestroy?.instanceId === current.instanceId ? lastDestroy.destroyed : true;
+      }
+    }
+    const summary = `Fatto: ${job.images.length} ${job.images.length === 1 ? 'immagine' : 'immagini'}, costo stimato $${job.cost}.`;
+    set('done', 100, job.keptUntil
+      ? `${summary} GPU ancora accesa per 5 minuti: la prossima immagine parte subito.`
+      : job.destroyed ? `${summary} GPU distrutta.` : `${summary} Controlla su cloud.vast.ai che l’istanza sia distrutta.`);
   }
 
   function instanceStatus() {
@@ -495,7 +625,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
   }
 
   return {
-    outputsDir, cleanupOrphans, startJob, startTraining, instanceStatus, destroyInstance,
+    outputsDir, cleanupOrphans, startJob, startTraining, startImageJob, instanceStatus, destroyInstance,
     getJob: (id) => publicJob(jobs.get(id)),
     cancelJob: (id) => { jobs.get(id)?.cancel?.(); return Boolean(jobs.get(id)); },
     activeInstanceIds: readActive,
@@ -503,22 +633,23 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
   };
 }
 
-// Rough end-to-end time per offer, used only to rank them: pulling and unpacking
-// the ~10 GB image dominates short jobs, GPU speed (dlperf) dominates long ones.
-const IMAGE_MB = 10500;
+// Rough end-to-end time per offer, used only to rank them: pulling and unpacking the
+// image (plus any startup download) dominates short jobs, GPU speed (dlperf) long ones.
 const EXCLUDED_GPUS = /^CMP /; // Mining cards: high dlperf score, crippled bf16.
 
-export function rankOffers(offers, characters) {
+export function rankOffers(offers, characters, profile = { imageMB: 10_500, extraMB: 0, loadMB: 4_500 }) {
   const audioSeconds = Math.max(10, characters / 15);
   return offers
     .filter((offer) => !EXCLUDED_GPUS.test(offer.gpu_name || '') && offer.inet_down > 0 && offer.dlperf > 0)
     .map((offer) => {
       const diskMBs = Math.max(200, offer.disk_bw || 200);
-      const pull = (IMAGE_MB * 8) / offer.inet_down + (IMAGE_MB * 2.2) / diskMBs + 45;
-      const load = 4500 / diskMBs + 25;
+      const pull = (profile.imageMB * 8) / offer.inet_down + (profile.imageMB * 2.2) / diskMBs + 45;
+      // Hugging Face rarely serves faster than ~5 Gbit/s, whatever the host's link.
+      const fetchExtra = profile.extraMB ? (profile.extraMB * 8) / Math.min(offer.inet_down, 5000) : 0;
+      const load = profile.loadMB / diskMBs + 25;
       // About 0.5 s of compute per second of audio on a dlperf-100 card.
       const generate = audioSeconds * 0.5 * (100 / offer.dlperf);
-      return { ...offer, estimatedSeconds: Math.round(pull + load + generate) };
+      return { ...offer, estimatedSeconds: Math.round(pull + fetchExtra + load + generate) };
     })
     // Faster first; one minute of waiting is worth about $1/h of price difference.
     .sort((a, b) => (a.estimatedSeconds + a.dph_total * 60) - (b.estimatedSeconds + b.dph_total * 60));
