@@ -97,6 +97,12 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === 'GET' && url.pathname === '/api/health') return send(res, 200, { ok: true, provider: 'Vast AI one-shot', persistentStorage: false });
+    // The custom header forces a CORS preflight, so other websites cannot trigger this.
+    if (req.method === 'POST' && url.pathname === '/api/shutdown' && req.headers['x-clova-takeover'] === '1') {
+      send(res, 200, { ok: true });
+      setImmediate(shutdown);
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/api/voices') return send(res, 200, { voices: await listVoices(), limit: MAX_VOICES });
 
     if (req.method === 'POST' && url.pathname === '/api/voices') {
@@ -171,26 +177,47 @@ const server = createServer(async (req, res) => {
   } catch (error) { return send(res, 500, { error: error.message || 'Errore inatteso.' }); }
 });
 
-server.on('error', (error) => {
-  if (error.code === 'EADDRINUSE') { console.log(`Clova Voice e' gia' aperta su http://127.0.0.1:${PORT}`); process.exitCode = 0; return; }
-  throw error;
+// Reopening START.bat while an older copy still runs (e.g. a minimized window)
+// would otherwise keep serving stale code: ask it to shut down, then take over.
+let tookOver = false;
+server.on('error', async (error) => {
+  if (error.code !== 'EADDRINUSE') throw error;
+  if (tookOver) { console.log(`La porta ${PORT} e' ancora occupata. Chiudi la vecchia finestra di Clova Voice e riapri START.bat.`); process.exitCode = 1; return; }
+  tookOver = true;
+  console.log('Trovata una copia di Clova Voice gia\' aperta: la chiudo (distruggendo eventuali GPU) e la sostituisco…');
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}/api/shutdown`, { method: 'POST', headers: { 'x-clova-takeover': '1' }, signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error(`risposta ${response.status}`);
+  } catch (reason) {
+    console.log(`La vecchia copia non risponde alla richiesta di chiusura (${reason.message}). Chiudi la sua finestra e riapri START.bat.`);
+    process.exitCode = 1;
+    return;
+  }
+  // Destroying a GPU can take a minute: wait for the port to be released.
+  for (let attempt = 0; attempt < 90; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const free = await fetch(`http://127.0.0.1:${PORT}/api/health`, { signal: AbortSignal.timeout(1000) }).then(() => false, () => true);
+    if (free) return server.listen(PORT, '127.0.0.1');
+  }
+  console.log('La vecchia copia non si e\' chiusa in tempo. Chiudi la sua finestra e riapri START.bat.');
+  process.exitCode = 1;
 });
-server.listen(PORT, '127.0.0.1', () => {
+server.on('listening', () => {
   console.log(`Clova Voice: http://127.0.0.1:${PORT}`);
   cloud.cleanupOrphans()
     .then((ids) => { if (ids.length) console.log(`Distrutte istanze Vast rimaste attive: ${ids.join(', ')}`); })
     .catch((error) => console.warn(`Pulizia istanze Vast saltata: ${error.message}`));
   if (process.argv.includes('--open')) spawn('cmd.exe', ['/c', 'start', '', `http://127.0.0.1:${PORT}`], { detached: true, stdio: 'ignore' }).unref();
 });
+server.listen(PORT, '127.0.0.1');
 
 // Closing the window or Ctrl+C must not leave a GPU billing.
 let shuttingDown = false;
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
-  process.on(signal, async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    console.log('Chiusura: distruggo eventuali GPU attive…');
-    await cloud.destroyAll().catch((error) => console.error(error.message));
-    process.exit(0);
-  });
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('Chiusura: distruggo eventuali GPU attive…');
+  await cloud.destroyAll().catch((error) => console.error(error.message));
+  process.exit(0);
 }
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) process.on(signal, shutdown);
