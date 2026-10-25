@@ -352,6 +352,12 @@ export function createCloud({ root, voicesDir }) {
       }
       updateCost();
       Object.assign(job, { files: { full: `/api/jobs/${job.id}/files/clova-voice.wav`, parts: `/api/jobs/${job.id}/files/clova-voice-blocchi.zip` }, chunks: remote.total, audioSeconds: remote.seconds, quality: remote.quality, weakest: remote.weakest });
+      // Saved next to the audio so the history survives app restarts.
+      await writeFile(join(folder, 'meta.json'), JSON.stringify({
+        id: job.id, createdAt: new Date(job.startedAt).toISOString(), voiceId: voice.id, voiceName: voice.name,
+        language, text, stability, takes, chunks: job.chunks, audioSeconds: job.audioSeconds,
+        quality: job.quality ?? null, weakest: job.weakest ?? [], gpu: job.gpu, cost: job.cost
+      }, null, 2));
       success = true;
     } finally {
       if (current && session === current) {

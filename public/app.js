@@ -156,6 +156,7 @@ $('generateButton').addEventListener('click', async () => {
       $('outputInfo').textContent = `${job.chunks} blocchi · ${job.audioSeconds} secondi di audio · costo GPU stimato $${job.cost}${check}`;
       $('audioOutput').hidden = false;
       await loadVoices(voiceId);
+      loadHistory();
     }
   } catch {
     $('result').hidden = false;
@@ -165,6 +166,69 @@ $('generateButton').addEventListener('click', async () => {
     setBusy(false);
   }
 });
+
+// History of finished generations, read from outputs/ on the server.
+const stabilityLabels = { natural: 'naturale', stable: 'stabile', very: 'molto stabile' };
+
+function duration(seconds) {
+  const total = Math.round(seconds || 0);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function renderHistory(entries) {
+  const list = $('historyList');
+  if (!entries.length) {
+    list.innerHTML = '<p class="muted">Ancora nessuna generazione.</p>';
+    return;
+  }
+  list.innerHTML = entries.map((entry) => {
+    const base = `/api/jobs/${entry.id}/files`;
+    const when = new Date(entry.createdAt).toLocaleString('it-IT', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const preview = entry.text
+      ? `<p class="history-text">${escapeHtml(entry.text.length > 220 ? `${entry.text.slice(0, 220)}…` : entry.text)}</p>`
+      : '<p class="history-text missing">Testo non salvato (generazione precedente alla cronologia).</p>';
+    const meta = [
+      duration(entry.audioSeconds),
+      entry.chunks ? `${entry.chunks} blocchi` : null,
+      entry.stability ? `lettura ${stabilityLabels[entry.stability] || entry.stability}` : null,
+      entry.takes > 1 ? `qualità alta${entry.quality ? ` (fedeltà ${Math.round(entry.quality * 100)}%)` : ''}` : null,
+      entry.cost != null ? `$${entry.cost}` : null,
+      bytes(entry.bytes)
+    ].filter(Boolean).join(' · ');
+    return `<article class="history-item">
+      <div class="history-head"><b>${escapeHtml(entry.voiceName || 'Generazione')}</b><span>${when}</span></div>
+      ${preview}
+      <div class="history-meta">${meta}</div>
+      <audio controls preload="none" src="${base}/clova-voice.wav"></audio>
+      <div class="actions">
+        <a class="download" href="${base}/clova-voice.wav?download">File unico (WAV)</a>
+        ${entry.hasParts ? `<a class="download" href="${base}/clova-voice-blocchi.zip?download">Più file (ZIP)</a>` : ''}
+        ${entry.text ? `<button type="button" class="ghost" data-reuse="${entry.id}">Riusa il testo</button>` : ''}
+        <button type="button" class="secondary" data-delete="${entry.id}">Elimina</button>
+      </div>
+    </article>`;
+  }).join('');
+  list.querySelectorAll('[data-reuse]').forEach((button) => button.addEventListener('click', () => {
+    text.value = entries.find((entry) => entry.id === button.dataset.reuse).text;
+    updateCharacters();
+    text.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }));
+  list.querySelectorAll('[data-delete]').forEach((button) => button.addEventListener('click', async () => {
+    if (!confirm('Eliminare definitivamente questa generazione dal PC?')) return;
+    const response = await fetch(`/api/history/${button.dataset.delete}`, { method: 'DELETE' });
+    if (!response.ok) alert((await response.json()).error || 'Non riesco a eliminarla.');
+    loadHistory();
+  }));
+}
+
+async function loadHistory() {
+  try {
+    const response = await fetch('/api/history');
+    if (response.ok) renderHistory((await response.json()).entries);
+  } catch { /* Server closed: keep the current list. */ }
+}
+
+loadHistory();
 
 // Pronunciation dictionary, saved in data/pronunce.txt and applied on the server.
 async function loadPronunciations() {

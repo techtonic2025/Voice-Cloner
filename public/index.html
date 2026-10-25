@@ -77,6 +77,10 @@
 
       <section class="card result" id="result" hidden></section>
       <section class="card result" id="audioOutput" hidden><h2>Audio pronto</h2><audio id="player" controls></audio><p class="downloads"><a id="downloadAudio" class="download">File unico (WAV)</a><a id="downloadParts" class="download">Più file, un blocco per frase (ZIP)</a></p><p class="muted" id="outputInfo"></p></section>
+      <section class="card result" id="historyCard">
+        <div class="heading"><h2>Cronologia</h2><p>Ogni generazione resta salvata sul PC finché non la elimini.</p></div>
+        <div class="history-list" id="historyList"><p class="muted">Caricamento…</p></div>
+      </section>
       <section class="note"><b>Come funziona:</b> i profili vocali restano nella cartella dell’app. A ogni generazione viene noleggiata una GPU Vast, la voce viene sintetizzata, i file vengono scaricati sul PC e la GPU viene distrutta, subito o dopo 5 minuti se scegli di tenerla accesa. Il tasto “Distruggi istanza” in alto la spegne quando vuoi. Se chiudi l’app a metà, la GPU viene distrutta alla chiusura o al riavvio successivo.</section>
     </main>
     <script src="/app.js"></script>

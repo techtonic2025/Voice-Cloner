@@ -131,6 +131,32 @@ function parsePronunciations(source) {
     .sort((a, b) => b[0].length - a[0].length);
 }
 
+// History: every finished generation lives in outputs/<id>/ (audio, zip, meta.json).
+// Folders from before meta.json existed are listed with what can be read from disk.
+async function historyEntry(id) {
+  const folder = join(cloud.outputsDir, id);
+  const audio = await stat(join(folder, 'clova-voice.wav')).catch(() => null);
+  if (!audio) return null;
+  const parts = await stat(join(folder, 'clova-voice-blocchi.zip')).catch(() => null);
+  let meta = {};
+  try { meta = JSON.parse(await readFile(join(folder, 'meta.json'), 'utf8')); } catch { /* Older generation. */ }
+  return {
+    id, createdAt: meta.createdAt || new Date(audio.mtimeMs).toISOString(),
+    voiceName: meta.voiceName || null, text: meta.text || null, language: meta.language || null,
+    stability: meta.stability || null, takes: meta.takes || null, chunks: meta.chunks ?? null,
+    // 16-bit mono 24 kHz WAV: 48,000 bytes per second after the 44-byte header.
+    audioSeconds: meta.audioSeconds ?? +((audio.size - 44) / 48_000).toFixed(1),
+    quality: meta.quality ?? null, weakest: meta.weakest || [], cost: meta.cost ?? null,
+    bytes: audio.size + (parts?.size || 0), hasParts: Boolean(parts)
+  };
+}
+
+async function listHistory() {
+  const entries = await readdir(cloud.outputsDir, { withFileTypes: true }).catch(() => []);
+  const items = await Promise.all(entries.filter((entry) => entry.isDirectory() && safeId(entry.name)).map((entry) => historyEntry(entry.name)));
+  return items.filter(Boolean).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 async function staticFile(req, res) {
   const requested = req.url === '/' ? '/index.html' : req.url.split('?')[0];
   const file = normalize(join(PUBLIC, requested));
@@ -213,20 +239,34 @@ const server = createServer(async (req, res) => {
 
     const jobMatch = url.pathname.match(/^\/api\/jobs\/([a-f0-9-]{36})(\/cancel|\/files\/(clova-voice\.wav|clova-voice-blocchi\.zip))?$/i);
     if (jobMatch) {
+      // Files are served straight from outputs/, so history entries keep working after a restart.
+      if (req.method === 'GET' && jobMatch[3]) {
+        const file = join(cloud.outputsDir, jobMatch[1], jobMatch[3]);
+        const info = await stat(file).catch(() => null);
+        if (!info) return send(res, 404, { error: 'File non disponibile.' });
+        const entry = await historyEntry(jobMatch[1]);
+        const when = new Date(entry?.createdAt || info.mtimeMs);
+        const pad = (value) => String(value).padStart(2, '0');
+        const stamp = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}_${pad(when.getHours())}-${pad(when.getMinutes())}`;
+        const filename = jobMatch[3].endsWith('.zip') ? `clova-${stamp}-blocchi.zip` : `clova-${stamp}.wav`;
+        res.writeHead(200, {
+          'content-type': jobMatch[3].endsWith('.zip') ? 'application/zip' : 'audio/wav', 'content-length': info.size,
+          ...(url.searchParams.has('download') ? { 'content-disposition': `attachment; filename="${filename}"` } : {})
+        });
+        return createReadStream(file).pipe(res);
+      }
       const job = cloud.getJob(jobMatch[1]);
       if (!job) return send(res, 404, { error: 'Generazione non trovata.' });
       if (req.method === 'GET' && !jobMatch[2]) return send(res, 200, { job });
       if (req.method === 'POST' && jobMatch[2] === '/cancel') { cloud.cancelJob(job.id); return send(res, 200, { ok: true }); }
-      if (req.method === 'GET' && jobMatch[3]) {
-        const file = join(cloud.outputsDir, job.id, jobMatch[3]);
-        const info = await stat(file).catch(() => null);
-        if (!info) return send(res, 404, { error: 'File non disponibile.' });
-        res.writeHead(200, {
-          'content-type': jobMatch[3].endsWith('.zip') ? 'application/zip' : 'audio/wav', 'content-length': info.size,
-          ...(url.searchParams.has('download') ? { 'content-disposition': `attachment; filename="${jobMatch[3]}"` } : {})
-        });
-        return createReadStream(file).pipe(res);
-      }
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/history') return send(res, 200, { entries: await listHistory() });
+    const historyMatch = url.pathname.match(/^\/api\/history\/([a-f0-9-]{36})$/i);
+    if (req.method === 'DELETE' && historyMatch) {
+      if (cloud.getJob(historyMatch[1]) && !(await historyEntry(historyMatch[1]))) return send(res, 409, { error: 'Generazione ancora in corso.' });
+      await rm(join(cloud.outputsDir, historyMatch[1]), { recursive: true, force: true });
+      return send(res, 200, { ok: true });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/instance') return send(res, 200, cloud.instanceStatus());
