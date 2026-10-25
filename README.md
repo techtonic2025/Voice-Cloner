@@ -13,7 +13,11 @@ Clonazione vocale personale con **Qwen3-TTS 12Hz 1.7B Base** e GPU temporanea.
    (almeno 1 Gbit/s), disco (almeno 1 GB/s) e potenza GPU (`dlperf`), poi prende la più rapida.
    Restano escluse le schede da mining e le Blackwell, non supportate. Poi avvia il worker, genera, scarica i file e
    **distrugge l'istanza**, anche in caso di errore, annullamento o budget esaurito.
-5. Scarica il **file unico** (WAV) oppure **più file** (ZIP con un WAV per blocco e
+5. Scegli cosa fare a fine lavoro: **distruggi subito** la GPU oppure **tienila accesa
+   5 minuti**. In questo caso la generazione successiva riparte subito, senza avvio e
+   senza ricaricare il modello, e i 5 minuti ricominciano. Finché la GPU è accesa compare in alto
+   un avviso con conto alla rovescia, spesa e tasto **Distruggi istanza**.
+6. Scarica il **file unico** (WAV) oppure **più file** (ZIP con un WAV per blocco e
    `testi.txt` con il testo di ogni blocco).
 
 La chiave Vast si legge da `api.txt`, escluso da git, oppure dalla variabile `VAST_API_KEY`.
@@ -27,12 +31,13 @@ Variabili opzionali:
 
 ## Velocità
 
-- Alla prima generazione il worker sceglie i ~15 secondi più puliti del campione,
-  li trascrive con Whisper e l'app li salva nel profilo (`reference-clip.wav` +
-  trascrizione). Dalla volta successiva Whisper viene saltato e Qwen lavora su un
-  riferimento corto.
+- Alla prima generazione il worker usa tutto il campione (fino a 2 minuti, tolti
+  i silenzi ai bordi), lo trascrive con Whisper large-v3-turbo e l'app salva
+  campione e trascrizione nel profilo (`reference-clip.wav`). Dalla volta successiva
+  Whisper viene saltato. Un campione lungo dà una somiglianza nettamente migliore
+  di un pezzo da 15 secondi.
 - Il prompt della voce viene calcolato una volta sola per job e riusato.
-- Il testo viene diviso in blocchi di circa 280 caratteri sui confini delle frasi e generato in
+- Il testo viene diviso in blocchi di circa 400 caratteri sui confini delle frasi e generato in
   batch (`CLOVA_BATCH_SIZE`, predefinito 4).
 - FlashAttention 2 se disponibile, altrimenti SDPA (`/health` indica quale).
 - Il tempo maggiore resta l'avvio dell'istanza e il download dell'immagine:
