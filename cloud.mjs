@@ -203,9 +203,9 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     return job;
   }
 
-  async function rent(job, signal, { maxRate, characters, minGpuRam, kind = 'voice' }) {
+  async function rent(job, signal, { maxRate, characters, minGpuRam, kind = 'voice', disk }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
-    const profile = WORKERS[kind];
+    const profile = { ...WORKERS[kind], ...(disk ? { disk } : {}) };
     const offers = await searchOffers(maxRate, characters, minGpuRam || profile.minGpuRam, profile);
     // Needed on the GPU to download private fine-tuned models and to upload new ones.
     const hfToken = await getHfToken();
@@ -442,7 +442,8 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       await endSession(); // A kept-alive voice GPU is usually too small for training.
       try {
         // characters: 0 ranks offers on boot time only (training time is not text-based).
-        current = await rent(job, signal, { maxRate, characters: 0, minGpuRam: 40_000 });
+        // Every epoch saves a full ~4.5 GB checkpoint next to the ~12 GB image: size the disk to fit.
+        current = await rent(job, signal, { maxRate, characters: 0, minGpuRam: 40_000, disk: 40 + epochs * 6 + 20 });
       } catch (error) {
         current = session;
         throw error;
