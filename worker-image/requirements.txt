@@ -1,0 +1,11 @@
+fastapi
+python-multipart
+uvicorn[standard]
+diffusers
+transformers
+accelerate
+sentencepiece
+protobuf
+pillow
+huggingface_hub
+hf_transfer
