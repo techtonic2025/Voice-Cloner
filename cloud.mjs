@@ -57,6 +57,17 @@ export function createCloud({ root, voicesDir }) {
     await writeFile(`${activeFile}.tmp`, JSON.stringify(list, null, 2));
     await rename(`${activeFile}.tmp`, activeFile);
   }
+  // Hosts that loaded the image but never started it are skipped in later searches.
+  const badHostsFile = join(root, 'data', 'bad-hosts.json');
+  async function readBadHosts() {
+    try { return JSON.parse(await readFile(badHostsFile, 'utf8')); } catch { return []; }
+  }
+  async function markBadHost(machineId) {
+    if (!machineId) return;
+    const hosts = [...new Set([...(await readBadHosts()), machineId])];
+    await mkdir(join(root, 'data'), { recursive: true });
+    await writeFile(badHostsFile, JSON.stringify(hosts, null, 2));
+  }
   async function track(id) { await writeActive([...new Set([...(await readActive()), id])]); }
   async function untrack(id) { await writeActive((await readActive()).filter((item) => item !== id)); }
 
@@ -105,7 +116,8 @@ export function createCloud({ root, voicesDir }) {
       }
     });
     const offers = Array.isArray(data.offers) ? data.offers : data.offers ? [data.offers] : [];
-    return rankOffers(offers, characters);
+    const badHosts = new Set(await readBadHosts());
+    return rankOffers(offers.filter((offer) => !badHosts.has(offer.machine_id)), characters);
   }
 
   function workerAddress(instance) {
@@ -184,9 +196,14 @@ export function createCloud({ root, voicesDir }) {
     if (!offers.length) throw new Error(`Nessuna GPU veloce disponibile sotto $${maxRate}/ora. Alza la tariffa massima e riprova.`);
 
     const token = randomBytes(24).toString('hex');
+    const bootDeadline = Date.now() + BOOT_TIMEOUT_MS;
+    let current = null;
+    let failedHosts = 0;
     for (const offer of offers.slice(0, 4)) {
       signal.throwIfAborted();
-      set('creating', 6, `Noleggio ${offer.gpu_name} · rete ${(offer.inet_down / 1000).toFixed(1)} Gbit/s · $${offer.dph_total.toFixed(3)}/ora · tempo stimato ~${Math.ceil(offer.estimatedSeconds / 60)} min…`);
+      if (Date.now() > bootDeadline) break;
+      const retry = failedHosts ? ` (macchina precedente bloccata, provo la successiva)` : '';
+      set('creating', 6, `Noleggio ${offer.gpu_name} · rete ${(offer.inet_down / 1000).toFixed(1)} Gbit/s · $${offer.dph_total.toFixed(3)}/ora · tempo stimato ~${Math.ceil(offer.estimatedSeconds / 60)} min${retry}…`);
       try {
         // 24 GB+ cards fit twice as many chunks per batch.
         const batchSize = offer.gpu_ram >= 23000 ? 8 : 4;
@@ -201,26 +218,42 @@ export function createCloud({ root, voicesDir }) {
         // Registered immediately so any later failure still destroys it.
         session = { instanceId: created.new_contract, token, gpu: offer.gpu_name, rate: offer.dph_total, rentedAt: Date.now(), address: null, keepUntil: null };
         await track(session.instanceId);
-        break;
       } catch (error) {
         if (signal.aborted) throw error;
         console.warn(`Offerta ${offer.id} non disponibile: ${error.message}`);
+        continue;
       }
-    }
-    if (!session) throw new Error('Nessuna delle GPU trovate ha accettato il noleggio. Riprova tra poco.');
-    const current = session;
-    Object.assign(job, { instanceId: current.instanceId, gpu: current.gpu, rate: current.rate });
+      current = session;
+      Object.assign(job, { instanceId: current.instanceId, gpu: current.gpu, rate: current.rate });
 
-    // 1. Wait for the container (image pull is the slow part).
-    const bootDeadline = Date.now() + BOOT_TIMEOUT_MS;
-    while (!current.address) {
+      // 1. Wait for the container (image pull is the slow part). Some hosts load the
+      // image and then park the contract as "stopped" without ever starting it:
+      // destroy those at once and move on to the next offer.
+      let stoppedPolls = 0;
+      while (!current.address && Date.now() <= bootDeadline) {
+        await sleep(5000, signal);
+        job.cost = costSince(current, current.rentedAt);
+        const { instances: instance } = await vast(`/instances/${current.instanceId}/`, { signal });
+        const elapsed = Math.round((Date.now() - current.rentedAt) / 1000);
+        set('booting', Math.min(38, 10 + elapsed / 15), `Avvio GPU e download del worker (${elapsed}s)… ${instance?.status_msg ? `· ${String(instance.status_msg).slice(0, 80)}` : ''}`);
+        if (instance?.actual_status === 'running') current.address = workerAddress(instance);
+        const stopped = instance && (instance.intended_status === 'stopped' || instance.cur_state === 'stopped' || ['exited', 'offline'].includes(instance.actual_status));
+        stoppedPolls = stopped ? stoppedPolls + 1 : 0;
+        if (stoppedPolls >= 12) break; // about one minute: brief stopped states can be transient
+      }
+      if (current.address) break;
       if (Date.now() > bootDeadline) throw new Error('La GPU non si è avviata in tempo.');
-      await sleep(5000, signal);
-      job.cost = costSince(current, current.rentedAt);
-      const { instances: instance } = await vast(`/instances/${current.instanceId}/`, { signal });
-      const elapsed = Math.round((Date.now() - current.rentedAt) / 1000);
-      set('booting', Math.min(38, 10 + elapsed / 15), `Avvio GPU e download del worker (${elapsed}s)… ${instance?.status_msg ? `· ${String(instance.status_msg).slice(0, 80)}` : ''}`);
-      if (instance?.actual_status === 'running') current.address = workerAddress(instance);
+      console.warn(`Istanza ${current.instanceId} ferma dopo il caricamento dell'immagine: la distruggo e provo un'altra macchina.`);
+      failedHosts++;
+      await markBadHost(offer.machine_id);
+      set('creating', 6, `La ${current.gpu} si è bloccata all’avvio: la distruggo e provo un’altra macchina…`);
+      await endSession();
+      current = null;
+    }
+    if (!current) {
+      throw new Error(failedHosts
+        ? 'Le GPU noleggiate si sono bloccate all’avvio e sono state distrutte. Riprova tra poco.'
+        : 'Nessuna delle GPU trovate ha accettato il noleggio. Riprova tra poco.');
     }
 
     // 2. Wait for Qwen and Whisper to load into VRAM.
