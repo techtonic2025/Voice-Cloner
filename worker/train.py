@@ -80,8 +80,11 @@ def run_logged(command: list[str], job: dict, log_path: Path, on_line: Callable[
 
 
 def patched_sft_script(attention: str) -> str:
-    """The official script hard-codes FlashAttention 2; fall back to SDPA when it is missing."""
+    """Adapt the official script: it asks Accelerate for TensorBoard logging without a
+    logging dir (an error on recent versions) and never logs anything anyway, and it
+    hard-codes FlashAttention 2, so fall back to SDPA when that is missing."""
     source = (FINETUNE_DIR / "sft_12hz.py").read_text(encoding="utf8")
+    source = re.sub(r"log_with\s*=\s*[\"']tensorboard[\"']", "log_with=None", source)
     if attention != "flash_attention_2":
         source = source.replace('"flash_attention_2"', f'"{attention}"').replace("'flash_attention_2'", f"'{attention}'")
     target = FINETUNE_DIR / "sft_clova.py"
@@ -144,15 +147,14 @@ def train(job: dict, files: list[Path], folder: Path, *, transcriber, clean_text
                detail=f"Addestramento: epoca 1 di {epochs}")
 
     def on_line(line: str) -> None:
-        loss = re.search(r"loss[^0-9\-]*(-?[0-9]+\.[0-9]+)", line, re.IGNORECASE)
-        step = re.search(r"step[^0-9]*([0-9]+)", line, re.IGNORECASE)
-        if loss:
-            job["loss"] = float(loss.group(1))
-        if step:
-            job["step"] = int(step.group(1))
-        done = len(list(output.glob("checkpoint-epoch-*"))) if output.exists() else 0
-        job["epoch"] = done
-        job["detail"] = f"Addestramento: epoca {min(done + 1, epochs)} di {epochs}" + (f" · loss {job['loss']:.3f}" if "loss" in job else "")
+        # The official script prints "Epoch 0 | Step 120 | Loss: 4.1234" every 10 steps.
+        progress = re.search(r"Epoch\s+(\d+)\s*\|\s*Step\s+(\d+)\s*\|\s*Loss:\s*(-?[0-9.]+)", line)
+        if not progress:
+            return
+        epoch, step, loss = int(progress.group(1)), int(progress.group(2)), float(progress.group(3))
+        # Fractional epochs, so the progress bar moves within an epoch.
+        job.update(epoch=round(epoch + min(step / steps_per_epoch, 1.0), 3), step=step, loss=loss,
+                   detail=f"Addestramento: epoca {epoch + 1} di {epochs} · passo {step} di {steps_per_epoch} · loss {loss:.3f}")
 
     run_logged([sys.executable, patched_sft_script(attention), "--init_model_path", base_model,
                 "--output_model_path", str(output), "--train_jsonl", str(codes),
