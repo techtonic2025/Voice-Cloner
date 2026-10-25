@@ -237,7 +237,8 @@ def train(job: dict, files: list[Path], folder: Path, *, transcriber, clean_text
         job.update(phase="checking", detail=f"Prova d'ascolto dell'epoca {number} di {len(checkpoints)} con Whisper…")
         scores[checkpoint.name] = round(checkpoint_score(checkpoint, speaker, language, load_model, score), 3)
         job["epoch_scores"] = scores
-    best = max(checkpoints, key=lambda p: scores[p.name])
+    # Ties (often all 100%) go to the latest epoch, which has adapted most to the voice.
+    best = max(checkpoints, key=lambda p: (scores[p.name], int(p.name.rsplit("-", 1)[-1])))
     best_epoch = int(best.name.rsplit("-", 1)[-1]) + 1
     job.update(best_epoch=best_epoch, fidelity=scores[best.name])
     if scores[best.name] < 0.6:
