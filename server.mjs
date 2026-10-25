@@ -1,9 +1,11 @@
 import { createServer } from 'node:http';
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { extname, join, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { createCloud } from './cloud.mjs';
 
 const PORT = Number(process.env.PORT || 4173);
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -11,6 +13,8 @@ const PUBLIC = join(ROOT, 'public');
 const VOICES = join(ROOT, 'data', 'voices');
 const MAX_VOICES = 3;
 const MAX_AUDIO_BYTES = 75 * 1024 * 1024;
+const MAX_TEXT_CHARS = 60_000;
+const cloud = createCloud({ root: ROOT, voicesDir: VOICES });
 
 const mime = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -28,7 +32,7 @@ async function body(req) {
   let value = '';
   for await (const chunk of req) {
     value += chunk;
-    if (value.length > 100_000) throw new Error('Richiesta troppo grande.');
+    if (value.length > 400_000) throw new Error('Richiesta troppo grande.');
   }
   return value ? JSON.parse(value) : {};
 }
@@ -61,7 +65,7 @@ async function listVoices() {
     if (!entry.isDirectory() || !safeId(entry.name)) continue;
     try {
       const meta = JSON.parse(await readFile(join(VOICES, entry.name, 'profile.json'), 'utf8'));
-      voices.push({ id: entry.name, name: meta.name, createdAt: meta.createdAt, size: meta.size });
+      voices.push({ id: entry.name, name: meta.name, createdAt: meta.createdAt, size: meta.size, prepared: Boolean(meta.referenceText) });
     } catch { /* Ignore incomplete profiles. */ }
   }
   return voices.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -120,23 +124,47 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/estimate') return send(res, 200, estimate(await body(req)));
-    if (req.method === 'POST' && url.pathname === '/api/job-plan') {
+    if (req.method === 'POST' && url.pathname === '/api/jobs') {
       const input = await body(req);
       if (!input.confirmDestroy) return send(res, 400, { error: 'Per proseguire devi confermare la distruzione automatica dell’istanza.' });
       const selectedVoice = safeId(input.voiceId);
-      const voices = await listVoices();
-      if (!selectedVoice || !voices.some((voice) => voice.id === selectedVoice)) return send(res, 400, { error: 'Scegli una voce salvata.' });
-      if (!String(input.text || '').trim()) return send(res, 400, { error: 'Incolla il testo da trasformare in voce.' });
-      const cost = estimate(input);
-      const cap = Math.max(0.10, Number(input.budgetCap) || 1);
-      if (cost.recommendedBudget > cap) return send(res, 400, { error: `La stima prudente ($${cost.recommendedBudget}) supera il tuo tetto di $${cap}.` });
-      return send(res, 200, { ok: true, cost, plan: [
-        'Usa il profilo vocale scelto, salvato solo su questo PC.',
-        'Crea una GPU temporanea senza volume persistente.',
-        'Invia automaticamente il riferimento al worker Qwen, genera e scarica il WAV.',
-        'Distruggi istanza e disco al termine, anche in caso di errore.'
-      ], warning: 'La generazione cloud automatica verrà collegata nel prossimo modulo: questo controllo non crea costi.' });
+      if (!selectedVoice || !(await listVoices()).some((voice) => voice.id === selectedVoice)) return send(res, 400, { error: 'Scegli una voce salvata.' });
+      const text = String(input.text || '').trim();
+      if (!text) return send(res, 400, { error: 'Incolla il testo da trasformare in voce.' });
+      if (text.length > MAX_TEXT_CHARS) return send(res, 400, { error: `Testo troppo lungo: massimo ${MAX_TEXT_CHARS.toLocaleString('it-IT')} caratteri.` });
+      const maxRate = Math.min(5, Math.max(0.05, Number(input.hourlyRate) || 0.4));
+      const budgetCap = Math.max(0.10, Number(input.budgetCap) || 1);
+      const cost = estimate({ ...input, characters: text.length, hourlyRate: maxRate });
+      if (cost.recommendedBudget > budgetCap) return send(res, 400, { error: `La stima prudente ($${cost.recommendedBudget}) supera il tuo tetto di $${budgetCap}.` });
+      const voice = JSON.parse(await readFile(join(VOICES, selectedVoice, 'profile.json'), 'utf8'));
+      const language = ['Italian', 'English', 'Spanish', 'French'].includes(input.language) ? input.language : 'Italian';
+      const pause = Math.min(2, Math.max(0, Number(input.pause) || 0.35));
+      try {
+        const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text, language, maxRate, budgetCap, pause });
+        return send(res, 202, { id: job.id, cost });
+      } catch (error) { return send(res, 409, { error: error.message }); }
     }
+
+    const jobMatch = url.pathname.match(/^\/api\/jobs\/([a-f0-9-]{36})(\/cancel|\/files\/(clova-voice\.wav|clova-voice-blocchi\.zip))?$/i);
+    if (jobMatch) {
+      const job = cloud.getJob(jobMatch[1]);
+      if (!job) return send(res, 404, { error: 'Generazione non trovata.' });
+      if (req.method === 'GET' && !jobMatch[2]) return send(res, 200, { job });
+      if (req.method === 'POST' && jobMatch[2] === '/cancel') { cloud.cancelJob(job.id); return send(res, 200, { ok: true }); }
+      if (req.method === 'GET' && jobMatch[3]) {
+        const file = join(cloud.outputsDir, job.id, jobMatch[3]);
+        const info = await stat(file).catch(() => null);
+        if (!info) return send(res, 404, { error: 'File non disponibile.' });
+        res.writeHead(200, {
+          'content-type': jobMatch[3].endsWith('.zip') ? 'application/zip' : 'audio/wav', 'content-length': info.size,
+          ...(url.searchParams.has('download') ? { 'content-disposition': `attachment; filename="${jobMatch[3]}"` } : {})
+        });
+        return createReadStream(file).pipe(res);
+      }
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/instances') return send(res, 200, { active: await cloud.activeInstanceIds() });
+    if (req.method === 'POST' && url.pathname === '/api/cleanup') return send(res, 200, { destroyed: await cloud.cleanupOrphans() });
     return staticFile(req, res);
   } catch (error) { return send(res, 500, { error: error.message || 'Errore inatteso.' }); }
 });
@@ -147,5 +175,20 @@ server.on('error', (error) => {
 });
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Clova Voice: http://127.0.0.1:${PORT}`);
+  cloud.cleanupOrphans()
+    .then((ids) => { if (ids.length) console.log(`Distrutte istanze Vast rimaste attive: ${ids.join(', ')}`); })
+    .catch((error) => console.warn(`Pulizia istanze Vast saltata: ${error.message}`));
   if (process.argv.includes('--open')) spawn('cmd.exe', ['/c', 'start', '', `http://127.0.0.1:${PORT}`], { detached: true, stdio: 'ignore' }).unref();
 });
+
+// Closing the window or Ctrl+C must not leave a GPU billing.
+let shuttingDown = false;
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  process.on(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log('Chiusura: distruggo eventuali GPU attive…');
+    await cloud.destroyAll().catch((error) => console.error(error.message));
+    process.exit(0);
+  });
+}

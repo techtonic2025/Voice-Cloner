@@ -2,51 +2,55 @@
 
 Clonazione vocale personale con **Qwen3-TTS 12Hz 1.7B Base** e GPU temporanea.
 
-## Stato del progetto
+## Come funziona
 
-L'interfaccia locale e il pianificatore sono pronti. Il worker usa ora Qwen,
-non Chatterbox, ed e' predisposto per contenere gia' i pesi del modello. In
-questo modo una GPU appena affittata non deve riscaricare circa 4,5 GB a ogni
-generazione.
+1. Avvia `START.bat` e apri l'app (http://127.0.0.1:4587).
+2. In "Le mie voci" carica fino a tre campioni (30–120 s vanno bene).
+3. Scegli la voce, incolla il testo (fino a 60.000 caratteri) e premi "Genera".
+4. L'app noleggia la GPU Vast più economica adatta, cioè con almeno 16 GB, architettura
+   Ampere/Ada e rete veloce. Poi avvia il worker, genera, scarica i file e
+   **distrugge l'istanza**, anche in caso di errore, annullamento o budget esaurito.
+5. Scarica il **file unico** (WAV) oppure **più file** (ZIP con un WAV per blocco e
+   `testi.txt` con il testo di ogni blocco).
 
-Per completare l'automazione manca la pubblicazione di `worker/Dockerfile` in
-un registro Docker privato (per esempio GitHub Container Registry). Solo allora
-l'app potra' creare la GPU Vast, inviare il campione, scaricare il WAV e
-distruggere l'istanza senza passaggi manuali.
+La chiave Vast si legge da `api.txt`, escluso da git, oppure dalla variabile `VAST_API_KEY`.
+Non arriva mai al browser.
 
-Non inserire chiavi API nel progetto o nel pacchetto distribuito. Ogni utente
-deve collegare il proprio account Vast e il proprio credito.
+Variabili opzionali:
 
-Il workflow `.github/workflows/publish-worker.yml` costruisce l'immagine a ogni
-push su `main` e la pubblica come `ghcr.io/techtonic2025/clova-voice-qwen`.
+- `CLOVA_WORKER_IMAGE`: immagine del worker (predefinita `ghcr.io/techtonic2025/clova-voice-qwen:latest`);
+- `CLOVA_IMAGE_LOGIN`: credenziali registro per Vast se l'immagine è privata,
+  es. `-u utente -p TOKEN ghcr.io`.
+
+## Velocità
+
+- Alla prima generazione il worker sceglie i ~15 secondi più puliti del campione,
+  li trascrive con Whisper e l'app li salva nel profilo (`reference-clip.wav` +
+  trascrizione). Dalla volta successiva Whisper viene saltato e Qwen lavora su un
+  riferimento corto.
+- Il prompt della voce viene calcolato una volta sola per job e riusato.
+- Il testo viene diviso in blocchi di circa 280 caratteri sui confini delle frasi e generato in
+  batch (`CLOVA_BATCH_SIZE`, predefinito 4).
+- FlashAttention 2 se disponibile, altrimenti SDPA (`/health` indica quale).
+- Il tempo maggiore resta l'avvio dell'istanza e il download dell'immagine:
+  per questo vengono scelte solo macchine con almeno 500 MB/s in download.
 
 ## Worker Qwen
 
-Il worker espone endpoint temporanei:
+- `GET /health`: modello caricato, errori di caricamento, tipo di attenzione;
+- `POST /jobs`: riferimento, trascrizione facoltativa, testo, lingua, pausa;
+- `GET /jobs/{id}`: avanzamento (`done`/`total`);
+- `GET /jobs/{id}/files/{full.wav|parts.zip|reference-clip.wav}`.
 
-- `GET /health`: verifica che il container sia raggiungibile;
-- `POST /warm`: carica Qwen in GPU prima del lavoro;
-- `POST /generate`: riceve audio di riferimento, trascrizione esatta e testo,
-  poi restituisce un WAV.
-
-Usa sempre una variabile casuale `CLOVA_JOB_TOKEN`. Il controllo locale la
-invia come `Authorization: Bearer ...`. L'istanza deve restare esposta solo per
-la durata del lavoro e va distrutta soltanto dopo il download del WAV.
-
-Qwen richiede la trascrizione del campione: deve corrispondere a cio' che si
-sente nell'audio. Per il clone rapido usa 10--30 secondi puliti. I 37 minuti di
-materiale sono invece utili per un futuro fine-tuning, dopo il taglio in clip
-brevi e la verifica delle trascrizioni.
-
-## Avvio dell'interfaccia locale
-
-1. Per usare il pianificatore senza server, fai doppio clic su `APRI-APP.html`.
-2. L'app si apre direttamente nel browser e non usa porte di rete.
-3. Il server Node resta disponibile per il futuro modulo cloud: fai doppio clic
-   su `START.bat` se necessario.
+Ogni istanza riceve un `CLOVA_JOB_TOKEN` casuale, inviato come `Authorization: Bearer ...`.
+Il workflow `.github/workflows/publish-worker.yml` ricostruisce l'immagine a ogni
+push su `main` che modifica `worker/`.
 
 ## Regola di costo
 
-L'app deve creare istanze Vast AI senza volume persistente e distruggerle al
-termine. Non basta fermare un'istanza: il disco puo' continuare a essere
-fatturato. Nessuna chiave viene salvata dal pianificatore locale.
+Le istanze vengono create senza volume persistente e distrutte al termine, perché
+fermarle non basta: il disco continuerebbe a essere fatturato. Ogni istanza creata viene
+annotata in `data/active-instances.json` finché Vast non ne conferma la distruzione.
+Alla chiusura dell'app e a ogni avvio vengono distrutte le istanze rimaste, sia quelle
+annotate sia quelle con etichetta `clova-voice-`. Il tetto di budget diventa anche un
+tempo massimo di noleggio.

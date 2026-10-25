@@ -25,7 +25,7 @@
             <label>Nome della voce<input id="voiceName" type="text" maxlength="60" placeholder="Es. Enzo Ufficiale" /></label>
             <label>Campione vocale<input id="reference" type="file" accept="audio/mpeg,audio/wav,audio/mp4,audio/ogg" /><small>Consigliati 30–120 secondi; massimo 75 MB.</small></label>
           </div>
-          <p class="helper">Non devi trascrivere nulla: la voce viene analizzata automaticamente quando generi l’audio.</p>
+          <p class="helper">Non devi trascrivere nulla: alla prima generazione l’app sceglie da sola i 15 secondi più puliti e li trascrive, poi li riusa (più veloce).</p>
           <button type="button" id="saveVoiceButton">Salva questa voce</button>
         </div>
         <section class="progress-panel" id="profileProgress" hidden aria-live="polite">
@@ -40,17 +40,22 @@
         <label>Voce da usare<select id="voiceSelect"><option value="">Prima salva o scegli una voce…</option></select></label>
         <label>Testo da trasformare in voce<textarea id="text" rows="8" placeholder="Incolla qui il tuo copione..."></textarea><small id="characters">0 caratteri</small></label>
         <div class="two">
-          <label>Tetto massimo per questo job (USD)<input id="budget" type="number" min="0.10" step="0.10" value="0.50" /><small>La generazione non parte se la stima supera questo importo.</small></label>
+          <label>Tetto massimo per questo job (USD)<input id="budget" type="number" min="0.10" step="0.10" value="1.00" /><small>La generazione non parte se la stima lo supera, e la GPU viene distrutta comunque al raggiungimento di questo tetto.</small></label>
           <label>Lingua<select id="language"><option value="Italian">Italiano</option><option value="English">English</option><option value="Spanish">Español</option><option value="French">Français</option></select><small>Usa la lingua del testo.</small></label>
         </div>
-        <details><summary>Impostazioni avanzate</summary><div class="two details"><label>Tariffa GPU massima/ora<input id="rate" type="number" min="0.05" step="0.01" value="0.20" /></label><label>Tempo GPU previsto (minuti)<input id="minutes" type="number" min="5" step="1" value="15" /></label></div></details>
+        <details><summary>Impostazioni avanzate</summary><div class="two details"><label>Tariffa GPU massima/ora (USD)<input id="rate" type="number" min="0.05" step="0.01" value="0.40" /><small>Serve una GPU con almeno 16 GB (es. RTX 3090/4090, A5000).</small></label><label>Tempo GPU previsto (minuti)<input id="minutes" type="number" min="5" step="1" value="15" /><small>Include avvio e download del worker.</small></label><label>Pausa tra i blocchi (secondi)<input id="pause" type="number" min="0" max="2" step="0.05" value="0.35" /></label></div></details>
         <label class="check"><input id="destroy" type="checkbox" /> Confermo: distruggi l’istanza e il suo disco alla fine, anche in caso di errore.</label>
-        <button type="button" id="generateButton">Genera con la voce selezionata</button>
+        <div class="actions"><button type="button" id="generateButton">Genera con la voce selezionata</button><button type="button" id="cancelButton" class="secondary" hidden>Annulla e distruggi la GPU</button></div>
+        <section class="progress-panel" id="jobProgress" hidden aria-live="polite">
+          <div class="progress-heading"><strong id="jobTitle">Preparazione</strong><b id="jobPercent">0%</b></div>
+          <div class="progress-track"><span id="jobBar"></span></div>
+          <p id="jobDetail"></p>
+        </section>
       </section>
 
       <section class="card result" id="result" hidden></section>
-      <section class="card result" id="audioOutput" hidden><h2>Audio pronto</h2><audio id="player" controls></audio><p><a id="downloadAudio" class="download" download="clova-voice.wav">Scarica audio WAV</a></p></section>
-      <section class="note"><b>Stato:</b> i profili vocali sono salvati localmente nella cartella dell’app, non nel repository e non nel cloud. L’automazione GPU verrà aggiunta al pulsante di generazione.</section>
+      <section class="card result" id="audioOutput" hidden><h2>Audio pronto</h2><audio id="player" controls></audio><p class="downloads"><a id="downloadAudio" class="download">File unico (WAV)</a><a id="downloadParts" class="download">Più file, un blocco per frase (ZIP)</a></p><p class="muted" id="outputInfo"></p></section>
+      <section class="note"><b>Come funziona:</b> i profili vocali restano nella cartella dell’app. A ogni generazione viene noleggiata una GPU Vast, la voce viene sintetizzata, i file vengono scaricati sul PC e la GPU viene distrutta. Se chiudi l’app a metà, la GPU viene distrutta alla chiusura o al riavvio successivo.</section>
     </main>
     <script src="/app.js"></script>
   </body>

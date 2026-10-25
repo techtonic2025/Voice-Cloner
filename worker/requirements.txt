@@ -2,5 +2,6 @@ fastapi
 python-multipart
 uvicorn[standard]
 soundfile
+numpy
 qwen-tts
 faster-whisper

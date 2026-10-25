@@ -25,7 +25,7 @@ function renderVoices(selectedId = $('voiceSelect').value) {
   if (!voices.length) {
     list.innerHTML = '<p class="muted">Non hai ancora salvato una voce.</p>';
   } else {
-    list.innerHTML = voices.map((voice) => `<div class="voice-row"><div><b>${escapeHtml(voice.name)}</b><small>Profilo locale · ${bytes(voice.size)}</small></div><button class="delete-voice" data-id="${voice.id}" type="button">Elimina</button></div>`).join('');
+    list.innerHTML = voices.map((voice) => `<div class="voice-row"><div><b>${escapeHtml(voice.name)}</b><small>Profilo locale · ${bytes(voice.size)}${voice.prepared ? ' · campione ottimizzato' : ' · verrà ottimizzato alla prima generazione'}</small></div><button class="delete-voice" data-id="${voice.id}" type="button">Elimina</button></div>`).join('');
     list.querySelectorAll('.delete-voice').forEach((button) => button.addEventListener('click', () => deleteVoice(button.dataset.id)));
   }
   voices.forEach((voice) => {
@@ -82,25 +82,84 @@ $('saveVoiceButton').addEventListener('click', async () => {
   }
 });
 
+const stepTitles = {
+  searching: 'Ricerca GPU', creating: 'Noleggio GPU', booting: 'Avvio GPU', loading: 'Caricamento modello',
+  uploading: 'Invio dati', generating: 'Generazione', downloading: 'Download', destroying: 'Distruzione GPU',
+  done: 'Completato', error: 'Errore'
+};
+
+function jobProgress(job) {
+  $('jobProgress').hidden = false;
+  $('jobTitle').textContent = stepTitles[job.status] || job.status;
+  $('jobPercent').textContent = `${Math.round(job.percent)}%`;
+  $('jobBar').style.width = `${job.percent}%`;
+  const cost = job.rate ? ` · ${job.gpu} · spesa finora $${job.cost.toFixed(3)}` : '';
+  $('jobDetail').textContent = (job.status === 'error' ? job.error : job.detail) + cost;
+}
+
+function setBusy(busy) {
+  $('generateButton').disabled = busy;
+  $('cancelButton').hidden = !busy;
+}
+
+async function followJob(id) {
+  for (;;) {
+    const response = await fetch(`/api/jobs/${id}`);
+    const { job, error } = await response.json();
+    if (!response.ok) throw new Error(error);
+    jobProgress(job);
+    if (job.status === 'done') return job;
+    if (job.status === 'error') {
+      // The server destroys the GPU before reporting the error; say so explicitly.
+      $('jobDetail').textContent = `${job.error}${job.instanceId ? (job.destroyed ? ' · GPU distrutta.' : ' · ATTENZIONE: distruzione non confermata, controlla cloud.vast.ai.') : ''}`;
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
+let currentJob = null;
+$('cancelButton').addEventListener('click', async () => {
+  if (!currentJob || !confirm('Annullare la generazione? La GPU verrà distrutta.')) return;
+  $('cancelButton').disabled = true;
+  await fetch(`/api/jobs/${currentJob}/cancel`, { method: 'POST' });
+  $('cancelButton').disabled = false;
+});
+
 $('generateButton').addEventListener('click', async () => {
   const voiceId = $('voiceSelect').value;
-  $('result').hidden = false;
-  $('result').innerHTML = '<p>Controllo budget e impostazioni…</p>';
+  $('result').hidden = true;
+  $('audioOutput').hidden = true;
   const payload = {
     voiceId, text: text.value, language: $('language').value, characters: text.value.length,
     hourlyRate: Number($('rate').value), minutes: Number($('minutes').value), safetyMinutes: 10,
-    budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked
+    budgetCap: Number($('budget').value), confirmDestroy: $('destroy').checked, pause: Number($('pause').value)
   };
   try {
-    const response = await fetch('/api/job-plan', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+    const response = await fetch('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     const data = await response.json();
     if (!response.ok) {
-      $('result').innerHTML = `<h2>Controlla il job</h2><p>${data.error}</p>`;
+      $('result').hidden = false;
+      $('result').innerHTML = `<h2>Controlla il job</h2><p>${escapeHtml(data.error)}</p>`;
       return;
     }
-    $('result').innerHTML = `<h2>Piano approvato</h2><div class="cost"><b>$${data.cost.estimatedGpuCost}</b><span>stima GPU per ${data.cost.totalMinutes} minuti</span></div><p>${data.warning}</p>`;
+    currentJob = data.id;
+    setBusy(true);
+    const job = await followJob(data.id);
+    if (job) {
+      $('player').src = job.files.full;
+      $('downloadAudio').href = `${job.files.full}?download`;
+      $('downloadParts').href = `${job.files.parts}?download`;
+      $('outputInfo').textContent = `${job.chunks} blocchi · ${job.audioSeconds} secondi di audio · costo GPU stimato $${job.cost}`;
+      $('audioOutput').hidden = false;
+      await loadVoices(voiceId);
+    }
   } catch {
-    $('result').innerHTML = '<h2>Server non raggiungibile</h2><p>Chiudi e riapri START.bat, poi ricarica questa pagina.</p>';
+    $('result').hidden = false;
+    $('result').innerHTML = '<h2>Server non raggiungibile</h2><p>Chiudi e riapri START.bat, poi ricarica questa pagina. Al riavvio l’app distrugge eventuali GPU rimaste attive.</p>';
+  } finally {
+    currentJob = null;
+    setBusy(false);
   }
 });
 
