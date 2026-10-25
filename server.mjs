@@ -132,7 +132,7 @@ const server = createServer(async (req, res) => {
       const text = String(input.text || '').trim();
       if (!text) return send(res, 400, { error: 'Incolla il testo da trasformare in voce.' });
       if (text.length > MAX_TEXT_CHARS) return send(res, 400, { error: `Testo troppo lungo: massimo ${MAX_TEXT_CHARS.toLocaleString('it-IT')} caratteri.` });
-      const maxRate = Math.min(5, Math.max(0.05, Number(input.hourlyRate) || 0.4));
+      const maxRate = Math.min(5, Math.max(0.05, Number(input.hourlyRate) || 0.8));
       const budgetCap = Math.max(0.10, Number(input.budgetCap) || 1);
       const cost = estimate({ ...input, characters: text.length, hourlyRate: maxRate });
       if (cost.recommendedBudget > budgetCap) return send(res, 400, { error: `La stima prudente ($${cost.recommendedBudget}) supera il tuo tetto di $${budgetCap}.` });

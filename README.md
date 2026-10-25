@@ -7,8 +7,11 @@ Clonazione vocale personale con **Qwen3-TTS 12Hz 1.7B Base** e GPU temporanea.
 1. Avvia `START.bat` e apri l'app (http://127.0.0.1:4587).
 2. In "Le mie voci" carica fino a tre campioni (30–120 s vanno bene).
 3. Scegli la voce, incolla il testo (fino a 60.000 caratteri) e premi "Genera".
-4. L'app noleggia la GPU Vast più economica adatta, cioè con almeno 16 GB, architettura
-   Ampere/Ada e rete veloce. Poi avvia il worker, genera, scarica i file e
+4. L'app noleggia la GPU Vast **più veloce** entro la tariffa massima (predefinita
+   0,80 $/ora). Per ogni offerta stima il tempo totale: download e
+   estrazione del worker, caricamento del modello, generazione. Considera rete
+   (almeno 1 Gbit/s), disco (almeno 1 GB/s) e potenza GPU (`dlperf`), poi prende la più rapida.
+   Restano escluse le schede da mining e le Blackwell, non supportate. Poi avvia il worker, genera, scarica i file e
    **distrugge l'istanza**, anche in caso di errore, annullamento o budget esaurito.
 5. Scarica il **file unico** (WAV) oppure **più file** (ZIP con un WAV per blocco e
    `testi.txt` con il testo di ogni blocco).
@@ -33,7 +36,8 @@ Variabili opzionali:
   batch (`CLOVA_BATCH_SIZE`, predefinito 4).
 - FlashAttention 2 se disponibile, altrimenti SDPA (`/health` indica quale).
 - Il tempo maggiore resta l'avvio dell'istanza e il download dell'immagine:
-  per questo vengono scelte solo macchine con almeno 500 MB/s in download.
+  per questo pesa molto nella scelta della macchina. Sulle GPU da 24 GB in su si
+  generano 8 blocchi alla volta invece di 4.
 
 ## Worker Qwen
 

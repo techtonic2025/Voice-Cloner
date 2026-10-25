@@ -89,19 +89,20 @@ export function createCloud({ root, voicesDir }) {
   }
 
   // compute_cap 800-900 = Ampere/Ada: Blackwell (1200) is not supported by torch 2.6 + flash-attn 2.7.
-  async function searchOffers(maxRate) {
+  async function searchOffers(maxRate, characters) {
     const data = await vast('/bundles/', {
       method: 'POST',
       body: {
-        limit: 10, type: 'ondemand',
+        limit: 200, type: 'ondemand',
         verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
         num_gpus: { eq: 1 }, gpu_ram: { gte: 16000 }, compute_cap: { gte: 800, lte: 900 },
         cuda_max_good: { gte: 12.6 }, reliability: { gte: 0.98 },
-        inet_down: { gte: 500 }, disk_space: { gte: 40 }, direct_port_count: { gte: 1 },
-        dph_total: { lte: maxRate }, order: [['dph_total', 'asc']]
+        inet_down: { gte: 1000 }, disk_bw: { gte: 1000 }, disk_space: { gte: 40 }, direct_port_count: { gte: 1 },
+        dph_total: { lte: maxRate }, order: [['dlperf', 'desc']]
       }
     });
-    return Array.isArray(data.offers) ? data.offers : data.offers ? [data.offers] : [];
+    const offers = Array.isArray(data.offers) ? data.offers : data.offers ? [data.offers] : [];
+    return rankOffers(offers, characters);
   }
 
   function workerAddress(instance) {
@@ -134,19 +135,21 @@ export function createCloud({ root, voicesDir }) {
     let instanceId = null;
     let rentedAt = 0;
     try {
-      const offers = await searchOffers(maxRate);
-      if (!offers.length) throw new Error(`Nessuna GPU disponibile sotto $${maxRate}/ora. Alza la tariffa massima e riprova.`);
+      const offers = await searchOffers(maxRate, text.length);
+      if (!offers.length) throw new Error(`Nessuna GPU veloce disponibile sotto $${maxRate}/ora. Alza la tariffa massima e riprova.`);
 
       const token = randomBytes(24).toString('hex');
       for (const offer of offers.slice(0, 4)) {
         signal.throwIfAborted();
-        set('creating', 6, `Noleggio ${offer.gpu_name} a $${offer.dph_total.toFixed(3)}/ora…`);
+        set('creating', 6, `Noleggio ${offer.gpu_name} · rete ${(offer.inet_down / 1000).toFixed(1)} Gbit/s · $${offer.dph_total.toFixed(3)}/ora · tempo stimato ~${Math.ceil(offer.estimatedSeconds / 60)} min…`);
         try {
+          // 24 GB+ cards fit twice as many chunks per batch.
+          const batchSize = offer.gpu_ram >= 23000 ? 8 : 4;
           const created = await vast(`/asks/${offer.id}/`, {
             method: 'PUT', signal,
             body: {
               client_id: 'me', image: IMAGE, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
-              disk: 40, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token}`,
+              disk: 40, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}`,
               ...(IMAGE_LOGIN ? { image_login: IMAGE_LOGIN } : {})
             }
           });
@@ -270,6 +273,27 @@ export function createCloud({ root, voicesDir }) {
     activeInstanceIds: readActive,
     destroyAll: async () => { running?.cancel?.(); for (const id of await readActive()) await destroy(id); }
   };
+}
+
+// Rough end-to-end time per offer, used only to rank them: pulling and unpacking
+// the ~9 GB image dominates short jobs, GPU speed (dlperf) dominates long ones.
+const IMAGE_MB = 9000;
+const EXCLUDED_GPUS = /^CMP /; // Mining cards: high dlperf score, crippled bf16.
+
+export function rankOffers(offers, characters) {
+  const audioSeconds = Math.max(10, characters / 15);
+  return offers
+    .filter((offer) => !EXCLUDED_GPUS.test(offer.gpu_name || '') && offer.inet_down > 0 && offer.dlperf > 0)
+    .map((offer) => {
+      const diskMBs = Math.max(200, offer.disk_bw || 200);
+      const pull = (IMAGE_MB * 8) / offer.inet_down + (IMAGE_MB * 2.2) / diskMBs + 45;
+      const load = 4500 / diskMBs + 25;
+      // About 0.5 s of compute per second of audio on a dlperf-100 card.
+      const generate = audioSeconds * 0.5 * (100 / offer.dlperf);
+      return { ...offer, estimatedSeconds: Math.round(pull + load + generate) };
+    })
+    // Faster first; one minute of waiting is worth about $1/h of price difference.
+    .sort((a, b) => (a.estimatedSeconds + a.dph_total * 60) - (b.estimatedSeconds + b.dph_total * 60));
 }
 
 function sleep(ms, signal) {
