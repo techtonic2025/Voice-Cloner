@@ -455,7 +455,7 @@ async def create_training(
                     load_model=lambda path: Qwen3TTSModel.from_pretrained(
                         path, device_map="cuda:0", dtype=torch.bfloat16, attn_implementation=attention_implementation(),
                     ),
-                    score=take_score,
+                    score=take_score, clone_model=MODEL,
                 )
             job.update(status="done", elapsed=round(time.time() - job["started"], 1))
         except Exception as exc:
@@ -471,6 +471,15 @@ async def create_training(
 def training_status(job_id: str, authorization: str | None = Header(default=None)) -> dict:
     require_token(authorization)
     return get_job(job_id)
+
+
+@app.get("/train/{job_id}/samples/{name}")
+def training_sample(job_id: str, name: str, authorization: str | None = Header(default=None)) -> FileResponse:
+    """Test sentences read by each epoch (and the real voice), to listen side by side."""
+    require_token(authorization)
+    if name not in get_job(job_id).get("samples", []):
+        raise HTTPException(status_code=404, detail="Campione non disponibile")
+    return FileResponse(WORK_DIR / job_id / "samples" / name)
 
 
 def get_job(job_id: str) -> dict:

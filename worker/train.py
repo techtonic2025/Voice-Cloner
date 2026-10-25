@@ -141,8 +141,51 @@ TEST_SENTENCES = [
 ]
 
 
-def checkpoint_score(checkpoint: Path, speaker: str, language: str, load_model, score) -> float:
-    """Let a checkpoint read two sentences it never saw and let Whisper judge them (0..1)."""
+SPEAKER_MODEL = os.getenv("SPEAKER_MODEL_PATH", "/models/wavlm-base-plus-sv")
+MIN_FIDELITY = 0.9  # Below this an epoch is only kept if nothing better exists.
+
+
+class SpeakerMeter:
+    """Speaker similarity with WavLM-SV (independent of Qwen): cosine between x-vectors,
+    the usual way TTS papers measure how close a clone is to the real speaker."""
+
+    def __init__(self) -> None:
+        import torch
+        from transformers import AutoFeatureExtractor, WavLMForXVector
+        self.torch = torch
+        self.extractor = AutoFeatureExtractor.from_pretrained(SPEAKER_MODEL)
+        self.model = WavLMForXVector.from_pretrained(SPEAKER_MODEL).to("cuda").eval()
+
+    def embed(self, wavs: list[np.ndarray], sample_rate: int):
+        audio16 = [np.interp(np.linspace(0, len(w) - 1, int(len(w) * 16_000 / sample_rate)), np.arange(len(w)), w).astype("float32")
+                   for w in wavs]
+        inputs = self.extractor(audio16, sampling_rate=16_000, return_tensors="pt", padding=True).to("cuda")
+        with self.torch.no_grad():
+            embeddings = self.model(**inputs).embeddings
+        return self.torch.nn.functional.normalize(embeddings, dim=-1)
+
+    def reference(self, paths: list[str]):
+        """Average voiceprint of real recordings."""
+        wavs = [sf.read(path, dtype="float32")[0] for path in paths]
+        return self.torch.nn.functional.normalize(self.embed(wavs, SAMPLE_RATE).mean(dim=0), dim=-1)
+
+    def similarity(self, wav: np.ndarray, sample_rate: int, reference) -> float:
+        return float(self.embed([wav], sample_rate)[0] @ reference)
+
+
+def evaluate(wavs, sample_rate: int, language: str, score, meter: SpeakerMeter, reference, samples: Path, label: str) -> dict:
+    """Fidelity (Whisper) and similarity (WavLM) of the test sentences; keeps the audio for listening."""
+    fidelity, similarity = [], []
+    for index, (wav, text) in enumerate(zip(wavs, TEST_SENTENCES), start=1):
+        wav = np.asarray(wav, dtype="float32").reshape(-1)
+        sf.write(samples / f"{label}-{index}.wav", wav, sample_rate)
+        fidelity.append(score(wav, sample_rate, text, language))
+        similarity.append(meter.similarity(wav, sample_rate, reference))
+    return {"fidelity": round(sum(fidelity) / len(fidelity), 3), "similarity": round(sum(similarity) / len(similarity), 3)}
+
+
+def checkpoint_metrics(checkpoint: Path, speaker: str, language: str, load_model, score, meter, reference, samples, label) -> dict:
+    """Let a checkpoint read two sentences it never saw, then measure it."""
     import torch
     model = load_model(str(checkpoint))
     try:
@@ -150,8 +193,7 @@ def checkpoint_score(checkpoint: Path, speaker: str, language: str, load_model, 
             text=TEST_SENTENCES, speaker=speaker, language=[language] * len(TEST_SENTENCES),
             max_new_tokens=600, do_sample=True, temperature=0.6, top_p=0.9,
         )
-        return sum(score(np.asarray(wav, dtype="float32").reshape(-1), sample_rate, text, language)
-                   for wav, text in zip(wavs, TEST_SENTENCES)) / len(TEST_SENTENCES)
+        return evaluate(wavs, sample_rate, language, score, meter, reference, samples, label)
     finally:
         del model
         torch.cuda.empty_cache()
@@ -159,7 +201,7 @@ def checkpoint_score(checkpoint: Path, speaker: str, language: str, load_model, 
 
 def train(job: dict, files: list[Path], folder: Path, *, transcriber, clean_text: Callable[[str], str],
           language: str, language_code: str | None, speaker: str, repo: str, token: str, epochs: int,
-          base_model: str, attention: str, load_model, score) -> None:
+          base_model: str, attention: str, load_model, score, clone_model) -> None:
     script = patched_sft_script(attention)  # Before any GPU work, so an upstream change fails fast.
     clips_dir = folder / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -192,7 +234,8 @@ def train(job: dict, files: list[Path], folder: Path, *, transcriber, clean_text
     # Same reference for every sample (recommended by Qwen): the clearest 8-12 s clip.
     candidates = [r for r in records if 8 <= r["duration"] <= 12] or records
     reference = folder / "ref.wav"
-    shutil.copy(max(candidates, key=lambda r: r["confidence"])["audio"], reference)
+    reference_record = max(candidates, key=lambda r: r["confidence"])
+    shutil.copy(reference_record["audio"], reference)
     raw = folder / "train_raw.jsonl"
     with raw.open("w", encoding="utf8") as handle:
         for record in records:
@@ -231,26 +274,57 @@ def train(job: dict, files: list[Path], folder: Path, *, transcriber, clean_text
     if not checkpoints:
         raise RuntimeError("L'addestramento non ha prodotto nessun checkpoint.")
 
-    # 4. Only a checkpoint that actually speaks is kept: each epoch reads two test sentences.
-    scores: dict[str, float] = {}
+    # 4. Each epoch reads two unseen sentences: Whisper measures fidelity to the text, WavLM
+    #    how close the voice is to the real recordings. The quick clone from the reference
+    #    clip is measured too, as the baseline the training has to beat.
+    samples = folder / "samples"
+    samples.mkdir(exist_ok=True)
+    job.update(phase="checking", detail="Preparo il confronto con la tua voce vera…")
+    meter = SpeakerMeter()
+    rng = np.random.default_rng(0)
+    real_clips = [records[i]["audio"] for i in rng.choice(len(records), size=min(24, len(records)), replace=False)]
+    voiceprint = meter.reference(real_clips)
+    for index, path in enumerate(real_clips[:2], start=1):
+        shutil.copy(path, samples / f"vera-{index}.wav")  # The real voice, to listen side by side.
+
+    import torch
+    prompt = clone_model.create_voice_clone_prompt(ref_audio=str(reference), ref_text=reference_record["text"])
+    wavs, sample_rate = clone_model.generate_voice_clone(
+        text=TEST_SENTENCES, language=[language] * len(TEST_SENTENCES), voice_clone_prompt=prompt,
+        max_new_tokens=600, do_sample=True, temperature=0.6, top_p=0.9,
+    )
+    baseline = evaluate(wavs, sample_rate, language, score, meter, voiceprint, samples, "clone")
+    job["baseline"] = baseline
+    torch.cuda.empty_cache()
+
+    metrics: dict[str, dict] = {}
     for number, checkpoint in enumerate(checkpoints, start=1):
-        job.update(phase="checking", detail=f"Prova d'ascolto dell'epoca {number} di {len(checkpoints)} con Whisper…")
-        scores[checkpoint.name] = round(checkpoint_score(checkpoint, speaker, language, load_model, score), 3)
-        job["epoch_scores"] = scores
-    # Ties (often all 100%) go to the latest epoch, which has adapted most to the voice.
-    best = max(checkpoints, key=lambda p: (scores[p.name], int(p.name.rsplit("-", 1)[-1])))
-    best_epoch = int(best.name.rsplit("-", 1)[-1]) + 1
-    job.update(best_epoch=best_epoch, fidelity=scores[best.name])
-    if scores[best.name] < 0.6:
-        raise RuntimeError(f"Nessuna epoca legge in modo comprensibile (fedeltà migliore {scores[best.name]:.0%}): "
+        job.update(detail=f"Prova d'ascolto dell'epoca {number} di {len(checkpoints)}: fedeltà al testo e somiglianza alla tua voce…")
+        metrics[str(number)] = checkpoint_metrics(checkpoint, speaker, language, load_model, score, meter, voiceprint,
+                                                  samples, f"epoca-{number:02d}")
+        job["epoch_scores"] = metrics
+    del meter
+    torch.cuda.empty_cache()
+    job["samples"] = sorted(path.name for path in samples.glob("*.wav"))
+
+    # Among the epochs that read correctly, keep the one that sounds most like you;
+    # ties go to the latest epoch, which has adapted most.
+    readable = [n for n in metrics if metrics[n]["fidelity"] >= MIN_FIDELITY]
+    pool = readable or list(metrics)
+    best_number = max(pool, key=lambda n: (metrics[n]["similarity"] if readable else metrics[n]["fidelity"], int(n)))
+    best = checkpoints[int(best_number) - 1]
+    chosen = metrics[best_number]
+    job.update(best_epoch=int(best_number), fidelity=chosen["fidelity"], similarity=chosen["similarity"])
+    if chosen["fidelity"] < 0.6:
+        raise RuntimeError(f"Nessuna epoca legge in modo comprensibile (fedeltà migliore {chosen['fidelity']:.0%}): "
                            "il modello non viene caricato su Hugging Face.")
 
     # 5. Private Hugging Face repo.
-    job.update(phase="uploading", epoch=epochs,
-               detail=f"Caricamento dell'epoca {best_epoch} (fedeltà {scores[best.name]:.0%}) su Hugging Face ({repo}, privato)…")
+    summary = f"epoca {best_number} di {epochs}, fedeltà {chosen['fidelity']:.0%}, somiglianza {chosen['similarity']:.0%}"
+    job.update(phase="uploading", epoch=epochs, detail=f"Caricamento ({summary}) su Hugging Face ({repo}, privato)…")
     from huggingface_hub import HfApi
     api = HfApi(token=token)
     api.create_repo(repo, private=True, exist_ok=True, repo_type="model")
     api.upload_folder(folder_path=str(best), repo_id=repo, repo_type="model",
-                      commit_message=f"Clova Voice: {len(records)} frasi, epoca {best_epoch} di {epochs}, fedeltà {scores[best.name]:.0%}")
+                      commit_message=f"Clova Voice: {len(records)} frasi, {summary}")
     job.update(phase="done", repo=repo, speaker=speaker, detail="Modello addestrato, verificato e salvato.")
