@@ -6,3 +6,6 @@ outputs/
 node_modules/
 *.log
 __pycache__/
+*.mkv
+*.mp4
+*.mov
