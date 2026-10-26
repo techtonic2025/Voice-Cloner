@@ -294,7 +294,11 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       try {
         const health = await (await workerFetch(current, '/health', { signal })).json();
         if (health.error) throw new Error(`Worker: ${health.error}`);
-        if (health.ready) { job.attention = health.attention; break; }
+        if (health.ready) {
+          job.attention = health.attention;
+          if (health.flash_attn_error) console.warn(`FlashAttention non attivo (torch ${health.torch}): ${health.flash_attn_error}`);
+          break;
+        }
         if (health.phase === 'downloading' && health.download != null) {
           set('loading', 38 + Math.round(health.download * 8), `Download di FLUX da Hugging Face: ${Math.round(health.download * 100)}%…`);
         } else {

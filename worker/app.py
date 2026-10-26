@@ -63,11 +63,16 @@ def require_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Token non valido")
 
 
+FLASH_ATTN_ERROR: str | None = None
+
+
 def attention_implementation() -> str:
+    global FLASH_ATTN_ERROR
     try:
         import flash_attn  # noqa: F401
         return "flash_attention_2"
-    except ImportError:
+    except ImportError as exc:  # Kept for /health: a wrong wheel fails here, not at install.
+        FLASH_ATTN_ERROR = str(exc)[:300]
         return "sdpa"
 
 
@@ -228,6 +233,14 @@ def longest_pause(wav: np.ndarray, sample_rate: int) -> float:
     return float(np.diff(index).max(initial=1) - 1) * frame / sample_rate if len(index) > 1 else 0.0
 
 
+def token_budget(texts: list[str]) -> int:
+    """Most audio frames a batch may produce. The model makes 12 frames per second and
+    reads ~15 characters per second, so a chunk needs ~0.8 frames per character:
+    2.5x that (plus a margin for short chunks) stops takes that never end, which
+    otherwise hold the whole batch until 2048 frames (almost three minutes of audio)."""
+    return min(2048, int(max(len(text) for text in texts) * 2 + 120))
+
+
 def trim_silence(wav: np.ndarray, sample_rate: int, keep: float = 0.05, max_pause: float = 0.7) -> np.ndarray:
     """Cut the silence the model leaves before and after a chunk, so the gap between
     chunks is only the chosen pause, and shorten the occasional multi-second stop
@@ -334,7 +347,8 @@ def run_job(job_id: str, source: Path | None, reference_text: str, text: str, la
 
                 def synthesize(texts: list[str]):
                     return trained_model.generate_custom_voice(
-                        text=texts, speaker=speaker, language=[language] * len(texts), max_new_tokens=2048, **sampling,
+                        text=texts, speaker=speaker, language=[language] * len(texts),
+                        max_new_tokens=token_budget(texts), **sampling,
                     )
             else:
                 job["status"] = "preparing"
@@ -358,7 +372,7 @@ def run_job(job_id: str, source: Path | None, reference_text: str, text: str, la
                 def synthesize(texts: list[str]):
                     return MODEL.generate_voice_clone(
                         text=texts, language=[language] * len(texts), voice_clone_prompt=prompt,
-                        max_new_tokens=2048, **sampling,
+                        max_new_tokens=token_budget(texts), **sampling,
                     )
 
             chunks = split_text(clean_text(text), chunk_chars)
@@ -426,6 +440,8 @@ def health() -> dict[str, object]:
         "error": LOAD_ERROR,
         "cuda": torch.cuda.is_available(),
         "attention": attention_implementation(),
+        "flash_attn_error": FLASH_ATTN_ERROR,
+        "torch": torch.__version__,
         "model": "Qwen3-TTS-12Hz-1.7B-Base",
     }
 
