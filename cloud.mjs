@@ -12,21 +12,26 @@ const IMAGE = process.env.CLOVA_WORKER_IMAGE || 'ghcr.io/techtonic2025/clova-voi
 const IMAGE_FLUX = process.env.CLOVA_IMAGE_WORKER || 'ghcr.io/techtonic2025/clova-image-flux:latest';
 const IMAGE_LOGIN = process.env.CLOVA_IMAGE_LOGIN || '';
 // LoRAs loaded into FLUX.1-dev at startup: its training data was filtered, so on its own it
-// draws adult nudity poorly. They apply only to requests with "No censura" ticked;
-// set IMAGE_LORAS_ENABLED to false to not even load them.
-// Format "repo:file:scale"; the minors filter in server.mjs applies either way.
+// draws adult nudity and gore poorly. Each group turns on only with its checkbox in the page
+// ("No censura" = nsfw, "Gore" = gore); set IMAGE_LORAS_ENABLED to false to not even load them.
+// spec is "repo:file:scale"; the minors filter in server.mjs applies either way.
 const IMAGE_LORAS_ENABLED = true;
 const IMAGE_LORAS = [
-  'lustlyai/Flux_Lustly.ai_Uncensored_nsfw_v1:flux_lustly-ai_v1.safetensors:0.9',
-  'Keltezaa/NSFW_MASTER_FLUX:NSFW_master_Flux.safetensors:0.5',
-  // Realistic gore; strongest when the prompt contains its trigger word "ccRealGore".
-  'CosmicCrafter/real-gore-by-cosmic:real-gore-by-cosmic.safetensors:0.8'
+  { group: 'nsfw', spec: 'lustlyai/Flux_Lustly.ai_Uncensored_nsfw_v1:flux_lustly-ai_v1.safetensors:0.9' },
+  { group: 'nsfw', spec: 'Keltezaa/NSFW_MASTER_FLUX:NSFW_master_Flux.safetensors:0.5' },
+  // Realistic gore; needs its trigger word "ccRealGore", which server.mjs adds to the prompt.
+  { group: 'gore', spec: 'CosmicCrafter/real-gore-by-cosmic:real-gore-by-cosmic.safetensors:0.8' }
 ];
-// Edits (FLUX Kontext) keep the subject's body only with lighter LoRAs, and no gore.
+// Edits (FLUX Kontext) keep the subject's body only with lighter nsfw LoRAs.
 const IMAGE_EDIT_LORAS = [
-  'lustlyai/Flux_Lustly.ai_Uncensored_nsfw_v1:flux_lustly-ai_v1.safetensors:0.75',
-  'Keltezaa/NSFW_MASTER_FLUX:NSFW_master_Flux.safetensors:0.4'
+  { group: 'nsfw', spec: 'lustlyai/Flux_Lustly.ai_Uncensored_nsfw_v1:flux_lustly-ai_v1.safetensors:0.75' },
+  { group: 'nsfw', spec: 'Keltezaa/NSFW_MASTER_FLUX:NSFW_master_Flux.safetensors:0.4' },
+  { group: 'gore', spec: 'CosmicCrafter/real-gore-by-cosmic:real-gore-by-cosmic.safetensors:0.8' }
 ];
+// Positions of the requested groups' LoRAs in a list, as the worker expects them.
+function loraIndexes(list, groups) {
+  return list.flatMap((lora, index) => (groups.includes(lora.group) ? [index] : [])).join(',');
+}
 // What each kind of worker needs from a GPU. imageMB is the Docker image, extraMB what
 // the worker downloads at startup (FLUX weights), downloadGB what the host bills as traffic
 // (measured on Vast invoices: some hosts charge up to $0.04/GB, more than the GPU itself).
@@ -260,7 +265,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
           method: 'PUT', signal,
           body: {
             client_id: 'me', image: profile.image, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
-            disk: profile.disk, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${kind === 'images' && IMAGE_LORAS_ENABLED ? ` -e FLUX_LORAS=${IMAGE_LORAS.join(',')} -e FLUX_EDIT_LORAS=${IMAGE_EDIT_LORAS.join(',')}` : ''}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
+            disk: profile.disk, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${kind === 'images' && IMAGE_LORAS_ENABLED ? ` -e FLUX_LORAS=${IMAGE_LORAS.map((lora) => lora.spec).join(',')} -e FLUX_EDIT_LORAS=${IMAGE_EDIT_LORAS.map((lora) => lora.spec).join(',')}` : ''}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
             ...(IMAGE_LOGIN ? { image_login: IMAGE_LOGIN } : {})
           }
         });
@@ -560,7 +565,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
 
   // Images: FLUX on a 45 GB+ GPU, same keep-alive and destruction rules as voice jobs.
   // With `source` (a PNG from the history) the job is an edit made with FLUX Kontext.
-  function startImageJob({ prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, budgetCap, keepAlive, source, adult }) {
+  function startImageJob({ prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, budgetCap, keepAlive, source, loraGroups = [] }) {
     if (running) throw new Error('C’è già un lavoro in corso. Attendi o annullalo.');
     const job = {
       id: randomUUID(), kind: 'images', status: 'searching', percent: 2, detail: 'Cerco una GPU da almeno 45 GB…',
@@ -572,13 +577,13 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    runImages(job, controller.signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source, adult })
+    runImages(job, controller.signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source, loraGroups })
       .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
       .finally(() => { clearTimeout(watchdog); running = null; });
     return job;
   }
 
-  async function runImages(job, signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source, adult }) {
+  async function runImages(job, signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source, loraGroups }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
     let current = null;
     let success = false;
@@ -606,7 +611,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       form.append('count', String(count));
       form.append('seed', String(seed ?? -1));
       form.append('steps', String(steps));
-      form.append('loras', adult && IMAGE_LORAS_ENABLED ? 'true' : 'false');
+      form.append('loras', IMAGE_LORAS_ENABLED ? loraIndexes(source ? IMAGE_EDIT_LORAS : IMAGE_LORAS, loraGroups) : '');
       if (source) form.append('image', new Blob([await readFile(source.path)], { type: 'image/png' }), 'source.png');
       const submitted = await worker('/images', { method: 'POST', body: form });
       const submittedData = await submitted.json();
@@ -641,7 +646,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       // Saved next to the files so the history survives app restarts.
       await writeFile(join(folder, 'meta.json'), JSON.stringify({
         id: job.id, kind: 'images', createdAt: new Date(job.startedAt).toISOString(), prompt, style, format,
-        width: remote.width, height: remote.height, steps, seeds: remote.seeds, images: job.images, gpu: job.gpu, cost: job.cost, adult: Boolean(adult),
+        width: remote.width, height: remote.height, steps, seeds: remote.seeds, images: job.images, gpu: job.gpu, cost: job.cost, loraGroups,
         ...(source ? { editedFrom: { id: source.id, name: source.name } } : {})
       }, null, 2));
       success = true;

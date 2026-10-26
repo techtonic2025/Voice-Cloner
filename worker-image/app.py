@@ -53,8 +53,8 @@ LORAS = lora_list("FLUX_LORAS")
 # Kontext gets its own, usually lighter, list: strong LoRAs reshape the body being edited.
 EDIT_LORAS = lora_list("FLUX_EDIT_LORAS")
 LORA_ERROR: str | None = None
-# id(pipeline) -> (adapter names, weights) of the LoRAs loaded into it.
-ADAPTERS: dict[int, tuple[list[str], list[float]]] = {}
+# id(pipeline) -> {LoRA index in its list: (adapter name, weight)} of the LoRAs loaded into it.
+ADAPTERS: dict[int, dict[int, tuple[str, float]]] = {}
 JOB_TOKEN = os.getenv("CLOVA_JOB_TOKEN", "")
 WORK_DIR = Path(tempfile.gettempdir()) / "clova-images"
 JOBS: dict[str, dict] = {}
@@ -94,27 +94,28 @@ def load_loras(pipe: FluxPipeline | FluxKontextPipeline, entries: list[list[str]
     keeps names apart in the text encoders FLUX.1-dev and Kontext share.
     A LoRA that fails to load is reported in /health and skipped: base FLUX still works."""
     global LORA_ERROR
-    names, weights = [], []
+    loaded = {}
     for index, (repo, filename, scale) in enumerate(entries):
         try:
             path = hf_hub_download(repo, filename, token=os.getenv("HF_TOKEN") or None)
             pipe.load_lora_weights(path, adapter_name=f"{prefix}{index}")
-            names.append(f"{prefix}{index}")
-            weights.append(float(scale))
+            loaded[index] = (f"{prefix}{index}", float(scale))
         except Exception as exc:
             LORA_ERROR = f"{repo}: {exc}"
-    if names:
-        ADAPTERS[id(pipe)] = (names, weights)
+    if loaded:
+        ADAPTERS[id(pipe)] = loaded
         pipe.disable_lora()
 
 
-def use_loras(pipe: FluxPipeline | FluxKontextPipeline, enabled: bool) -> None:
-    names, weights = ADAPTERS.get(id(pipe), ([], []))
-    if not names:
+def use_loras(pipe: FluxPipeline | FluxKontextPipeline, wanted: set[int]) -> None:
+    """Turn on only the requested LoRAs (by position in the app's list), all others off."""
+    loaded = ADAPTERS.get(id(pipe), {})
+    chosen = [loaded[index] for index in sorted(wanted) if index in loaded]
+    if not loaded:
         return
-    if enabled:
+    if chosen:
         pipe.enable_lora()
-        pipe.set_adapters(names, adapter_weights=weights)
+        pipe.set_adapters([name for name, _ in chosen], adapter_weights=[weight for _, weight in chosen])
     else:
         pipe.disable_lora()
 
@@ -189,7 +190,7 @@ def on_gpu(wanted: FluxTransformer2DModel, idle: FluxTransformer2DModel | None) 
 
 
 def run_job(job_id: str, prompt: str, width: int, height: int, count: int, seed: int,
-            steps: int, guidance: float, source: Image.Image | None = None, loras: bool = False) -> None:
+            steps: int, guidance: float, source: Image.Image | None = None, loras: set[int] | None = None) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     try:
@@ -200,7 +201,7 @@ def run_job(job_id: str, prompt: str, width: int, height: int, count: int, seed:
             else:
                 pipe = PIPE
                 on_gpu(PIPE.transformer, KONTEXT.transformer if KONTEXT else None)
-            use_loras(pipe, loras)
+            use_loras(pipe, loras or set())
             job.update(status="generating", total=count, done=0)
             seeds = []
             for index in range(count):
@@ -238,7 +239,7 @@ def create_job(
     steps: int = Form(28),
     guidance: float = Form(-1),
     image: UploadFile | None = File(None),
-    loras: bool = Form(False),
+    loras: str = Form(""),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -260,7 +261,8 @@ def create_job(
     threading.Thread(
         target=run_job,
         args=(job_id, prompt, width, height, min(max(count, 1), 4), seed,
-              min(max(steps, 8), 50), min(max(guidance, 1.0), 10.0), source, loras),
+              min(max(steps, 8), 50), min(max(guidance, 1.0), 10.0), source,
+              {int(part) for part in loras.split(",") if part.strip().isdigit()}),
         daemon=True,
     ).start()
     return {"id": job_id}

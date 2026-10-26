@@ -434,15 +434,17 @@ const server = createServer(async (req, res) => {
         if (entry?.kind !== 'images' || !entry.images.includes(name)) return send(res, 400, { error: 'L’immagine da modificare non è più nella cronologia.' });
         source = { id, name, path: join(cloud.outputsDir, id, name) };
       }
+      // "No censura" and "Horror" turn on separate LoRA groups; the gore LoRA needs its trigger word.
+      const loraGroups = [input.uncensored === true && 'nsfw', input.horror === true && 'gore'].filter(Boolean);
+      const trigger = loraGroups.includes('gore') && !/ccRealGore/i.test(prompt) ? 'ccRealGore, ' : '';
       try {
         const job = cloud.startImageJob({
           // An edit is an instruction ("make the sky red"): no style suffix appended.
-          prompt, fullPrompt: source ? prompt : prompt + IMAGE_STYLES[style], style, format, width, height, source,
+          prompt, fullPrompt: trigger + (source ? prompt : prompt + IMAGE_STYLES[style]), style, format, width, height, source, loraGroups,
           count: Math.min(4, Math.max(1, Number(input.count) || 1)), seed,
           steps: { fast: 20, normal: 28, max: 40 }[input.quality] || 28,
           maxRate: Math.min(5, Math.max(0.2, Number(input.hourlyRate) || 1)),
-          budgetCap: Math.max(0.1, Number(input.budgetCap) || 1), keepAlive: input.keepAlive === true,
-          adult: input.adult === true
+          budgetCap: Math.max(0.1, Number(input.budgetCap) || 1), keepAlive: input.keepAlive === true
         });
         return send(res, 202, { id: job.id });
       } catch (error) { return send(res, 409, { error: error.message }); }
