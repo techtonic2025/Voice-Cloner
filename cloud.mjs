@@ -21,6 +21,8 @@ const BOOT_TIMEOUT_MS = 20 * 60_000;
 const KEEP_ALIVE_MS = Number(process.env.CLOVA_KEEP_ALIVE_MS) || 5 * 60_000;
 // Bump when the worker changes how it prepares the reference, so old clips are redone.
 const CLIP_VERSION = 2;
+// Syllables per second of natural Italian narration (measured on the TechTonic recordings: 7.04).
+const NATURAL_RATE = 7.0;
 // Worker errors that mean the host itself cannot reach Hugging Face.
 const HOST_NETWORK_ERROR = /CERTIFICATE_VERIFY_FAILED|SSLError|MaxRetryError|ConnectionPool|Connection(Error| refused| reset)|Name or service not known|Temporary failure in name resolution/i;
 // Sampling presets sent to the worker; "natural" keeps the model defaults (temperature 0.9, top_p 1).
@@ -334,6 +336,8 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         // Fine-tuned voice: the worker downloads the model from the private HF repo.
         form.append('trained_repo', voice.repo);
         form.append('speaker', voice.speaker);
+        // Fine-tuned models drift faster or slower take by take: hold them to the speaker's own pace.
+        form.append('target_rate', String(voice.naturalRate || NATURAL_RATE));
       } else {
         const useClip = Boolean(voice.clipFilename && voice.referenceText && voice.clipVersion === CLIP_VERSION);
         const referenceFile = join(voicesDir, voice.id, useClip ? voice.clipFilename : voice.filename);

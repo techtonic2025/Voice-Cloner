@@ -250,6 +250,33 @@ def trim_silence(wav: np.ndarray, sample_rate: int, keep: float = 0.05, max_paus
     return np.concatenate(pieces)
 
 
+def syllables(text: str) -> int:
+    """Rough Italian syllable count: one per group of vowels (English words come out close enough)."""
+    return len(re.findall(r"[aeiouyàáèéìíòóùú]+", text.lower()))
+
+
+def speech_seconds(wav: np.ndarray, sample_rate: int) -> float:
+    """Time spent talking: voiced frames plus gaps under 0.2 s (stops inside words),
+    without the pauses between phrases."""
+    voiced, frame = voiced_frames(wav, sample_rate)
+    index = np.flatnonzero(voiced)
+    if not len(index):
+        return 0.0
+    gaps = np.diff(index)
+    frames = 1 + int(np.sum(np.where(gaps <= 20, gaps, 1)))
+    return frames * frame / sample_rate
+
+
+def natural_speed(wav: np.ndarray, sample_rate: int, text: str, target_rate: float) -> float:
+    """Speed factor that brings a take to the speaker's own pace (syllables per second).
+    Only slows down or speeds up within 0.8-1.15, never touching takes already close."""
+    seconds = speech_seconds(wav, sample_rate)
+    if target_rate <= 0 or seconds < 1:
+        return 1.0
+    factor = target_rate / (syllables(text) / seconds)
+    return 1.0 if abs(factor - 1) < 0.03 else min(max(factor, 0.8), 1.15)
+
+
 def apply_pronunciations(text: str, entries: list[list[str]]) -> str:
     """Respell foreign words as they sound ("file" -> "fàil"), whole words only,
     keeping a leading capital. Takes are still checked against the original text,
@@ -289,7 +316,7 @@ def take_score(wav: np.ndarray, sample_rate: int, target: str, language: str) ->
 
 def run_job(job_id: str, source: Path | None, reference_text: str, text: str, language: str, pause: float,
             temperature: float, top_p: float, takes: int, pronunciations: list[list[str]], speed: float,
-            ref_seconds: float, trained_repo: str = "", speaker: str = "") -> None:
+            ref_seconds: float, trained_repo: str = "", speaker: str = "", target_rate: float = 0.0) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     sampling: dict[str, object] = {}
@@ -365,7 +392,11 @@ def run_job(job_id: str, source: Path | None, reference_text: str, text: str, la
 
         job["status"] = "packing"
         # Applied after Whisper picked the takes, so scoring always sees the raw audio.
-        parts = [change_speed(trim_silence(part, sample_rate), speed) for part in parts]
+        # With a target pace (the speaker's own syllables per second) each chunk is first
+        # brought to it, then the user's speed applies on top.
+        paces = [natural_speed(part, sample_rate, chunk, target_rate) for chunk, part in zip(chunks, parts)]
+        job["pace"] = [round(pace, 2) for pace in paces]
+        parts = [change_speed(trim_silence(part, sample_rate), speed * pace) for part, pace in zip(parts, paces)]
         silence = np.zeros(int(sample_rate * pause), dtype="float32")
         full = []
         for index, part in enumerate(parts):
@@ -413,6 +444,7 @@ async def create_job(
     pronunciations: str = Form("[]"),
     speed: float = Form(1.0),
     ref_seconds: float = Form(REF_MAX_SECONDS),
+    target_rate: float = Form(0.0),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -447,7 +479,7 @@ async def create_job(
         target=run_job,
         args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5),
               min(max(top_p, 0), 1), min(max(takes, 1), 3), entries, min(max(speed, 0.7), 1.3),
-              min(max(ref_seconds, 10.0), REF_MAX_SECONDS), trained_repo, speaker),
+              min(max(ref_seconds, 10.0), REF_MAX_SECONDS), trained_repo, speaker, min(max(target_rate, 0.0), 12.0)),
         daemon=True,
     ).start()
     return {"id": job_id}
