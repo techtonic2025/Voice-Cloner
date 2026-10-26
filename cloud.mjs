@@ -336,8 +336,9 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         // Fine-tuned voice: the worker downloads the model from the private HF repo.
         form.append('trained_repo', voice.repo);
         form.append('speaker', voice.speaker);
-        // Fine-tuned models drift faster or slower take by take: hold them to the speaker's own pace.
-        form.append('target_rate', String(voice.naturalRate || NATURAL_RATE));
+        // Holding takes to the speaker's pace stretches the audio (WSOLA), which drags the
+        // vowels and sounds coarse, so it only runs for voices that opt in.
+        if (voice.autoPace) form.append('target_rate', String(voice.naturalRate || NATURAL_RATE));
       } else {
         const useClip = Boolean(voice.clipFilename && voice.referenceText && voice.clipVersion === CLIP_VERSION);
         const referenceFile = join(voicesDir, voice.id, useClip ? voice.clipFilename : voice.filename);
