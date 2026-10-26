@@ -11,6 +11,14 @@ const LABEL_PREFIX = 'clova-voice-';
 const IMAGE = process.env.CLOVA_WORKER_IMAGE || 'ghcr.io/techtonic2025/clova-voice-qwen:latest';
 const IMAGE_FLUX = process.env.CLOVA_IMAGE_WORKER || 'ghcr.io/techtonic2025/clova-image-flux:latest';
 const IMAGE_LOGIN = process.env.CLOVA_IMAGE_LOGIN || '';
+// LoRAs fused into FLUX.1-dev at startup: its training data was filtered, so on its own it
+// draws adult nudity poorly. Set IMAGE_LORAS_ENABLED to false to run plain FLUX.
+// Format "repo:file:scale"; the minors filter in server.mjs applies either way.
+const IMAGE_LORAS_ENABLED = true;
+const IMAGE_LORAS = [
+  'lustlyai/Flux_Lustly.ai_Uncensored_nsfw_v1:flux_lustly-ai_v1.safetensors:0.9',
+  'Keltezaa/NSFW_MASTER_FLUX:NSFW_master_Flux.safetensors:0.5'
+];
 // What each kind of worker needs from a GPU. imageMB is the Docker image, extraMB what
 // the worker downloads at startup (FLUX weights), downloadGB what the host bills as traffic
 // (measured on Vast invoices: some hosts charge up to $0.04/GB, more than the GPU itself).
@@ -244,7 +252,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
           method: 'PUT', signal,
           body: {
             client_id: 'me', image: profile.image, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
-            disk: profile.disk, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
+            disk: profile.disk, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${kind === 'images' && IMAGE_LORAS_ENABLED ? ` -e FLUX_LORAS=${IMAGE_LORAS.join(',')}` : ''}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
             ...(IMAGE_LOGIN ? { image_login: IMAGE_LOGIN } : {})
           }
         });
@@ -299,6 +307,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         if (health.error) throw new Error(`Worker: ${health.error}`);
         if (health.ready) {
           job.attention = health.attention;
+          if (health.lora_error) console.warn(`LoRA non caricato, FLUX funziona senza: ${health.lora_error}`);
           if (health.flash_attn_error) console.warn(`FlashAttention non attivo (torch ${health.torch}): ${health.flash_attn_error}`);
           break;
         }

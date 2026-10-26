@@ -9,3 +9,4 @@ protobuf
 pillow
 huggingface_hub
 hf_transfer
+peft

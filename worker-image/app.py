@@ -20,7 +20,7 @@ import torch
 from diffusers import FluxPipeline
 from fastapi import FastAPI, Form, Header, HTTPException
 from fastapi.responses import FileResponse
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
 app = FastAPI(title="Clova Voice FLUX worker", docs_url=None, redoc_url=None)
 PIPE: FluxPipeline | None = None
@@ -33,6 +33,9 @@ MODEL_DIR = Path(os.getenv("FLUX_DIR", "/models/flux1-dev"))
 ALLOW = ["model_index.json", "scheduler/*", "text_encoder/*", "text_encoder_2/*",
          "tokenizer/*", "tokenizer_2/*", "transformer/*", "vae/*"]
 EXPECTED_BYTES = 33.7e9
+# LoRAs fused at startup, "repo:file:scale" separated by commas (set by the app; empty = plain FLUX).
+LORAS = [entry.split(":") for entry in os.getenv("FLUX_LORAS", "").split(",") if entry.count(":") == 2]
+LORA_ERROR: str | None = None
 JOB_TOKEN = os.getenv("CLOVA_JOB_TOKEN", "")
 WORK_DIR = Path(tempfile.gettempdir()) / "clova-images"
 JOBS: dict[str, dict] = {}
@@ -54,7 +57,9 @@ def load_model() -> None:
         PHASE = "downloading"
         snapshot_download(REPO, local_dir=MODEL_DIR, allow_patterns=ALLOW, token=os.getenv("HF_TOKEN") or None)
         PHASE = "loading"
-        PIPE = FluxPipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.bfloat16).to("cuda")
+        pipe = FluxPipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.bfloat16).to("cuda")
+        load_loras(pipe)
+        PIPE = pipe
         PHASE = "ready"
     except Exception as exc:  # Reported through /health so the orchestrator can give up early.
         message = str(exc)
@@ -63,6 +68,25 @@ def load_model() -> None:
                        "con il tuo account e controlla il token Hugging Face nell'app.")
         LOAD_ERROR = message
         PHASE = "error"
+
+
+def load_loras(pipe: FluxPipeline) -> None:
+    """Fuse the LoRAs into the weights, so generation runs as fast as plain FLUX.
+    A LoRA that fails to load is reported in /health and skipped: base FLUX still works."""
+    global LORA_ERROR
+    names, weights = [], []
+    for index, (repo, filename, scale) in enumerate(LORAS):
+        try:
+            path = hf_hub_download(repo, filename, token=os.getenv("HF_TOKEN") or None)
+            pipe.load_lora_weights(path, adapter_name=f"lora{index}")
+            names.append(f"lora{index}")
+            weights.append(float(scale))
+        except Exception as exc:
+            LORA_ERROR = f"{repo}: {exc}"
+    if names:
+        pipe.set_adapters(names, adapter_weights=weights)
+        pipe.fuse_lora(adapter_names=names)
+        pipe.unload_lora_weights()
 
 
 @app.on_event("startup")
@@ -81,6 +105,7 @@ def health() -> dict[str, object]:
     return {
         "ok": LOAD_ERROR is None, "ready": PIPE is not None, "error": LOAD_ERROR,
         "phase": PHASE, "download": progress, "cuda": torch.cuda.is_available(), "model": REPO,
+        "loras": [repo for repo, _, _ in LORAS], "lora_error": LORA_ERROR,
     }
 
 
