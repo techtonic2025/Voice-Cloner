@@ -12,10 +12,11 @@ const IMAGE = process.env.CLOVA_WORKER_IMAGE || 'ghcr.io/techtonic2025/clova-voi
 const IMAGE_FLUX = process.env.CLOVA_IMAGE_WORKER || 'ghcr.io/techtonic2025/clova-image-flux:latest';
 const IMAGE_LOGIN = process.env.CLOVA_IMAGE_LOGIN || '';
 // What each kind of worker needs from a GPU. imageMB is the Docker image, extraMB what
-// the worker downloads at startup (FLUX weights), workSeconds a rough per-job GPU time.
+// the worker downloads at startup (FLUX weights), downloadGB what the host bills as traffic
+// (measured on Vast invoices: some hosts charge up to $0.04/GB, more than the GPU itself).
 const WORKERS = {
-  voice: { image: IMAGE, minGpuRam: 16_000, disk: 40, imageMB: 10_500, extraMB: 0, loadMB: 4_500, loadTimeoutMs: 10 * 60_000 },
-  images: { image: IMAGE_FLUX, minGpuRam: 45_000, disk: 90, imageMB: 7_000, extraMB: 34_000, loadMB: 34_000, loadTimeoutMs: 30 * 60_000 }
+  voice: { image: IMAGE, minGpuRam: 16_000, disk: 40, imageMB: 10_500, extraMB: 0, loadMB: 4_500, downloadGB: 10, loadTimeoutMs: 10 * 60_000 },
+  images: { image: IMAGE_FLUX, minGpuRam: 45_000, disk: 90, imageMB: 7_000, extraMB: 34_000, loadMB: 34_000, downloadGB: 30, loadTimeoutMs: 30 * 60_000 }
 };
 const BOOT_TIMEOUT_MS = 20 * 60_000;
 const KEEP_ALIVE_MS = Number(process.env.CLOVA_KEEP_ALIVE_MS) || 5 * 60_000;
@@ -144,8 +145,10 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
   let session = null;
   let lastDestroy = null;
 
+  // The host's download fee is paid once per rental, so it counts only from the rental start.
   function costSince(current, from) {
-    return +((Date.now() - from) / 3_600_000 * current.rate).toFixed(4);
+    const traffic = from === current.rentedAt ? current.downloadCost || 0 : 0;
+    return +((Date.now() - from) / 3_600_000 * current.rate + traffic).toFixed(4);
   }
 
   async function endSession() {
@@ -233,7 +236,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       signal.throwIfAborted();
       if (Date.now() > bootDeadline) break;
       const retry = failedHosts ? ` (macchina precedente bloccata, provo la successiva)` : '';
-      set('creating', 6, `Noleggio ${offer.gpu_name} · rete ${(offer.inet_down / 1000).toFixed(1)} Gbit/s · $${offer.dph_total.toFixed(3)}/ora · tempo stimato ~${Math.ceil(offer.estimatedSeconds / 60)} min${retry}…`);
+      set('creating', 6, `Noleggio ${offer.gpu_name} · rete ${(offer.inet_down / 1000).toFixed(1)} Gbit/s · $${offer.dph_total.toFixed(3)}/ora${offer.downloadCost >= 0.01 ? ` + download ~$${offer.downloadCost.toFixed(2)}` : ''} · tempo stimato ~${Math.ceil(offer.estimatedSeconds / 60)} min${retry}…`);
       try {
         // 24 GB+ cards fit twice as many chunks per batch.
         const batchSize = offer.gpu_ram >= 23000 ? 8 : 4;
@@ -246,7 +249,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
           }
         });
         // Registered immediately so any later failure still destroys it.
-        session = { instanceId: created.new_contract, machineId: offer.machine_id, kind, token, gpu: offer.gpu_name, rate: offer.dph_total, rentedAt: Date.now(), address: null, keepUntil: null };
+        session = { instanceId: created.new_contract, machineId: offer.machine_id, kind, token, gpu: offer.gpu_name, rate: offer.dph_total, downloadCost: offer.downloadCost, rentedAt: Date.now(), address: null, keepUntil: null };
         await track(session.instanceId);
       } catch (error) {
         if (signal.aborted) throw error;
@@ -664,7 +667,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
 // image (plus any startup download) dominates short jobs, GPU speed (dlperf) long ones.
 const EXCLUDED_GPUS = /^CMP /; // Mining cards: high dlperf score, crippled bf16.
 
-export function rankOffers(offers, characters, profile = { imageMB: 10_500, extraMB: 0, loadMB: 4_500 }) {
+export function rankOffers(offers, characters, profile = { imageMB: 10_500, extraMB: 0, loadMB: 4_500, downloadGB: 10 }) {
   const audioSeconds = Math.max(10, characters / 15);
   return offers
     .filter((offer) => !EXCLUDED_GPUS.test(offer.gpu_name || '') && offer.inet_down > 0 && offer.dlperf > 0)
@@ -676,10 +679,12 @@ export function rankOffers(offers, characters, profile = { imageMB: 10_500, extr
       const load = profile.loadMB / diskMBs + 25;
       // About 0.5 s of compute per second of audio on a dlperf-100 card.
       const generate = audioSeconds * 0.5 * (100 / offer.dlperf);
-      return { ...offer, estimatedSeconds: Math.round(pull + fetchExtra + load + generate) };
+      const downloadCost = (profile.downloadGB || 0) * Math.max(0, offer.inet_down_cost || 0);
+      return { ...offer, downloadCost, estimatedSeconds: Math.round(pull + fetchExtra + load + generate) };
     })
-    // Faster first; one minute of waiting is worth about $1/h of price difference.
-    .sort((a, b) => (a.estimatedSeconds + a.dph_total * 60) - (b.estimatedSeconds + b.dph_total * 60));
+    // Faster first; one minute of waiting is worth about $1/h of price difference,
+    // and each dollar of download fee about 20 minutes, so traffic-billing hosts sink.
+    .sort((a, b) => (a.estimatedSeconds + a.dph_total * 60 + a.downloadCost * 1200) - (b.estimatedSeconds + b.dph_total * 60 + b.downloadCost * 1200));
 }
 
 function sleep(ms, signal) {
