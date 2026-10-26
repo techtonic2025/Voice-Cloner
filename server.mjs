@@ -399,7 +399,8 @@ const server = createServer(async (req, res) => {
           takes: input.quality === 'high' ? 3 : 1,
           speed: Math.min(1.3, Math.max(0.7, Number(input.speed) || 1)),
           refSeconds: { short: 20, medium: 40 }[input.refLength] || 120,
-          chunkChars: Math.min(600, Math.max(80, Number(input.chunkChars) || 400)),
+          // Fine-tuned voices learned from 3-12 s clips and speak best one or two sentences at a time.
+          chunkChars: Math.min(600, Math.max(80, Number(input.chunkChars) || (voice.type === 'trained' ? 150 : 400))),
           pronunciations: language === 'Italian' ? parsePronunciations(await readPronunciations()) : [] });
         return send(res, 202, { id: job.id, cost });
       } catch (error) { return send(res, 409, { error: error.message }); }
