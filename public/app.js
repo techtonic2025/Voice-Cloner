@@ -447,6 +447,7 @@ $('imageButton').addEventListener('click', async () => {
     prompt: $('imagePrompt').value, style: $('imageStyle').value, format: $('imageFormat').value,
     count: Number($('imageCount').value), quality: $('imageQuality').value, seed: $('imageSeed').value,
     confirmDestroy: $('imageConfirm').checked, keepAlive: document.querySelector('input[name="imageLifecycle"]:checked').value === 'keep',
+    adult: $('imageAdult').checked,
     ...(editSource ? { source: editSource } : {})
   };
   const response = await fetch('/api/images', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });

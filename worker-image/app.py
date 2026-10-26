@@ -43,7 +43,8 @@ EXPECTED_BYTES = 33.7e9
 KONTEXT_REPO = os.getenv("KONTEXT_REPO", "black-forest-labs/FLUX.1-Kontext-dev")
 KONTEXT_DIR = Path(os.getenv("KONTEXT_DIR", "/models/flux1-kontext-dev"))
 KONTEXT_BYTES = 23.8e9
-# LoRAs fused at startup, "repo:file:scale" separated by commas (set by the app; empty = plain FLUX).
+# LoRAs loaded at startup, "repo:file:scale" separated by commas (set by the app; empty = plain FLUX).
+# They stay separate from the weights and each request turns them on or off.
 def lora_list(variable: str) -> list[list[str]]:
     return [entry.split(":") for entry in os.getenv(variable, "").split(",") if entry.count(":") == 2]
 
@@ -52,6 +53,8 @@ LORAS = lora_list("FLUX_LORAS")
 # Kontext gets its own, usually lighter, list: strong LoRAs reshape the body being edited.
 EDIT_LORAS = lora_list("FLUX_EDIT_LORAS")
 LORA_ERROR: str | None = None
+# id(pipeline) -> (adapter names, weights) of the LoRAs loaded into it.
+ADAPTERS: dict[int, tuple[list[str], list[float]]] = {}
 JOB_TOKEN = os.getenv("CLOVA_JOB_TOKEN", "")
 WORK_DIR = Path(tempfile.gettempdir()) / "clova-images"
 JOBS: dict[str, dict] = {}
@@ -74,7 +77,7 @@ def load_model() -> None:
         snapshot_download(REPO, local_dir=MODEL_DIR, allow_patterns=ALLOW, token=os.getenv("HF_TOKEN") or None)
         PHASE = "loading"
         pipe = FluxPipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.bfloat16).to("cuda")
-        load_loras(pipe, LORAS)
+        load_loras(pipe, LORAS, "gen")
         PIPE = pipe
         PHASE = "ready"
     except Exception as exc:  # Reported through /health so the orchestrator can give up early.
@@ -86,23 +89,34 @@ def load_model() -> None:
         PHASE = "error"
 
 
-def load_loras(pipe: FluxPipeline | FluxKontextPipeline, entries: list[list[str]]) -> None:
-    """Fuse the LoRAs into the weights, so generation runs as fast as plain FLUX.
+def load_loras(pipe: FluxPipeline | FluxKontextPipeline, entries: list[list[str]], prefix: str) -> None:
+    """Load the LoRAs as switchable adapters, off until a request asks for them. The prefix
+    keeps names apart in the text encoders FLUX.1-dev and Kontext share.
     A LoRA that fails to load is reported in /health and skipped: base FLUX still works."""
     global LORA_ERROR
     names, weights = [], []
     for index, (repo, filename, scale) in enumerate(entries):
         try:
             path = hf_hub_download(repo, filename, token=os.getenv("HF_TOKEN") or None)
-            pipe.load_lora_weights(path, adapter_name=f"lora{index}")
-            names.append(f"lora{index}")
+            pipe.load_lora_weights(path, adapter_name=f"{prefix}{index}")
+            names.append(f"{prefix}{index}")
             weights.append(float(scale))
         except Exception as exc:
             LORA_ERROR = f"{repo}: {exc}"
     if names:
+        ADAPTERS[id(pipe)] = (names, weights)
+        pipe.disable_lora()
+
+
+def use_loras(pipe: FluxPipeline | FluxKontextPipeline, enabled: bool) -> None:
+    names, weights = ADAPTERS.get(id(pipe), ([], []))
+    if not names:
+        return
+    if enabled:
+        pipe.enable_lora()
         pipe.set_adapters(names, adapter_weights=weights)
-        pipe.fuse_lora(adapter_names=names)
-        pipe.unload_lora_weights()
+    else:
+        pipe.disable_lora()
 
 
 @app.on_event("startup")
@@ -161,7 +175,7 @@ def kontext_pipeline(job: dict) -> FluxKontextPipeline:
             text_encoder=PIPE.text_encoder, tokenizer=PIPE.tokenizer,
             text_encoder_2=PIPE.text_encoder_2, tokenizer_2=PIPE.tokenizer_2,
         )
-        load_loras(KONTEXT, EDIT_LORAS)
+        load_loras(KONTEXT, EDIT_LORAS, "edit")
     return KONTEXT
 
 
@@ -175,7 +189,7 @@ def on_gpu(wanted: FluxTransformer2DModel, idle: FluxTransformer2DModel | None) 
 
 
 def run_job(job_id: str, prompt: str, width: int, height: int, count: int, seed: int,
-            steps: int, guidance: float, source: Image.Image | None = None) -> None:
+            steps: int, guidance: float, source: Image.Image | None = None, loras: bool = False) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     try:
@@ -186,6 +200,7 @@ def run_job(job_id: str, prompt: str, width: int, height: int, count: int, seed:
             else:
                 pipe = PIPE
                 on_gpu(PIPE.transformer, KONTEXT.transformer if KONTEXT else None)
+            use_loras(pipe, loras)
             job.update(status="generating", total=count, done=0)
             seeds = []
             for index in range(count):
@@ -223,6 +238,7 @@ def create_job(
     steps: int = Form(28),
     guidance: float = Form(-1),
     image: UploadFile | None = File(None),
+    loras: bool = Form(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -244,7 +260,7 @@ def create_job(
     threading.Thread(
         target=run_job,
         args=(job_id, prompt, width, height, min(max(count, 1), 4), seed,
-              min(max(steps, 8), 50), min(max(guidance, 1.0), 10.0), source),
+              min(max(steps, 8), 50), min(max(guidance, 1.0), 10.0), source, loras),
         daemon=True,
     ).start()
     return {"id": job_id}

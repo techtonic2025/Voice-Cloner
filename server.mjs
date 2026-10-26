@@ -441,7 +441,8 @@ const server = createServer(async (req, res) => {
           count: Math.min(4, Math.max(1, Number(input.count) || 1)), seed,
           steps: { fast: 20, normal: 28, max: 40 }[input.quality] || 28,
           maxRate: Math.min(5, Math.max(0.2, Number(input.hourlyRate) || 1)),
-          budgetCap: Math.max(0.1, Number(input.budgetCap) || 1), keepAlive: input.keepAlive === true
+          budgetCap: Math.max(0.1, Number(input.budgetCap) || 1), keepAlive: input.keepAlive === true,
+          adult: input.adult === true
         });
         return send(res, 202, { id: job.id });
       } catch (error) { return send(res, 409, { error: error.message }); }

@@ -11,8 +11,9 @@ const LABEL_PREFIX = 'clova-voice-';
 const IMAGE = process.env.CLOVA_WORKER_IMAGE || 'ghcr.io/techtonic2025/clova-voice-qwen:latest';
 const IMAGE_FLUX = process.env.CLOVA_IMAGE_WORKER || 'ghcr.io/techtonic2025/clova-image-flux:latest';
 const IMAGE_LOGIN = process.env.CLOVA_IMAGE_LOGIN || '';
-// LoRAs fused into FLUX.1-dev at startup: its training data was filtered, so on its own it
-// draws adult nudity poorly. Set IMAGE_LORAS_ENABLED to false to run plain FLUX.
+// LoRAs loaded into FLUX.1-dev at startup: its training data was filtered, so on its own it
+// draws adult nudity poorly. They apply only to requests with "Contenuti per adulti" ticked;
+// set IMAGE_LORAS_ENABLED to false to not even load them.
 // Format "repo:file:scale"; the minors filter in server.mjs applies either way.
 const IMAGE_LORAS_ENABLED = true;
 const IMAGE_LORAS = [
@@ -559,7 +560,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
 
   // Images: FLUX on a 45 GB+ GPU, same keep-alive and destruction rules as voice jobs.
   // With `source` (a PNG from the history) the job is an edit made with FLUX Kontext.
-  function startImageJob({ prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, budgetCap, keepAlive, source }) {
+  function startImageJob({ prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, budgetCap, keepAlive, source, adult }) {
     if (running) throw new Error('C’è già un lavoro in corso. Attendi o annullalo.');
     const job = {
       id: randomUUID(), kind: 'images', status: 'searching', percent: 2, detail: 'Cerco una GPU da almeno 45 GB…',
@@ -571,13 +572,13 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    runImages(job, controller.signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source })
+    runImages(job, controller.signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source, adult })
       .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
       .finally(() => { clearTimeout(watchdog); running = null; });
     return job;
   }
 
-  async function runImages(job, signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source }) {
+  async function runImages(job, signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source, adult }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
     let current = null;
     let success = false;
@@ -605,6 +606,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       form.append('count', String(count));
       form.append('seed', String(seed ?? -1));
       form.append('steps', String(steps));
+      form.append('loras', adult && IMAGE_LORAS_ENABLED ? 'true' : 'false');
       if (source) form.append('image', new Blob([await readFile(source.path)], { type: 'image/png' }), 'source.png');
       const submitted = await worker('/images', { method: 'POST', body: form });
       const submittedData = await submitted.json();
@@ -639,7 +641,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       // Saved next to the files so the history survives app restarts.
       await writeFile(join(folder, 'meta.json'), JSON.stringify({
         id: job.id, kind: 'images', createdAt: new Date(job.startedAt).toISOString(), prompt, style, format,
-        width: remote.width, height: remote.height, steps, seeds: remote.seeds, images: job.images, gpu: job.gpu, cost: job.cost,
+        width: remote.width, height: remote.height, steps, seeds: remote.seeds, images: job.images, gpu: job.gpu, cost: job.cost, adult: Boolean(adult),
         ...(source ? { editedFrom: { id: source.id, name: source.name } } : {})
       }, null, 2));
       success = true;
