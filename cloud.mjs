@@ -12,7 +12,7 @@ const IMAGE = process.env.CLOVA_WORKER_IMAGE || 'ghcr.io/techtonic2025/clova-voi
 const IMAGE_FLUX = process.env.CLOVA_IMAGE_WORKER || 'ghcr.io/techtonic2025/clova-image-flux:latest';
 const IMAGE_LOGIN = process.env.CLOVA_IMAGE_LOGIN || '';
 // LoRAs loaded into FLUX.1-dev at startup: its training data was filtered, so on its own it
-// draws adult nudity poorly. They apply only to requests with "Contenuti per adulti" ticked;
+// draws adult nudity poorly. They apply only to requests with "No censura" ticked;
 // set IMAGE_LORAS_ENABLED to false to not even load them.
 // Format "repo:file:scale"; the minors filter in server.mjs applies either way.
 const IMAGE_LORAS_ENABLED = true;
