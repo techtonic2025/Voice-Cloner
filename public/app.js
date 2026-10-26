@@ -19,7 +19,21 @@ function bytes(value) {
   return value < 1024 * 1024 ? `${Math.ceil(value / 1024)} KB` : `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function renderVoices(selectedId = $('voiceSelect').value) {
+// Per-viewer conveniences kept across reloads: last voice and the destroy confirmation.
+function remember(key, value) {
+  try { localStorage.setItem(`clova.${key}`, value); } catch { /* Storage blocked: nothing to keep. */ }
+}
+function recall(key) {
+  try { return localStorage.getItem(`clova.${key}`); } catch { return null; }
+}
+
+// The sample length only matters for instant clones: a trained voice has no sample.
+function updateVoiceOptions() {
+  const voice = voices.find((item) => item.id === $('voiceSelect').value);
+  $('refLengthLabel').hidden = voice?.type === 'trained';
+}
+
+function renderVoices(selectedId = $('voiceSelect').value || recall('voice')) {
   const list = $('voiceList');
   const select = $('voiceSelect');
   select.innerHTML = '<option value="">Scegli una voce salvata…</option>';
@@ -43,8 +57,18 @@ function renderVoices(selectedId = $('voiceSelect').value) {
     option.selected = voice.id === selectedId;
     select.append(option);
   });
+  // Nothing remembered: start from the trained voice, or the only one there is.
+  if (!select.value && voices.length) select.value = (voices.find((voice) => voice.type === 'trained') || voices[0]).id;
+  updateVoiceOptions();
   $('newVoicePanel').hidden = voices.length >= voiceLimit;
 }
+
+$('voiceSelect').addEventListener('change', () => {
+  remember('voice', $('voiceSelect').value);
+  updateVoiceOptions();
+});
+$('destroy').checked = recall('confirmDestroy') === '1';
+$('destroy').addEventListener('change', () => remember('confirmDestroy', $('destroy').checked ? '1' : '0'));
 
 async function toggleTranscript(id) {
   const panel = $(`transcript-${id}`);
@@ -156,10 +180,20 @@ $('cancelButton').addEventListener('click', async () => {
   $('cancelButton').disabled = false;
 });
 
+// Shown right under the button, where the click happened.
+function generateError(message) {
+  $('generateError').hidden = !message;
+  $('generateError').textContent = message || '';
+}
+
 $('generateButton').addEventListener('click', async () => {
   const voiceId = $('voiceSelect').value;
   $('result').hidden = true;
   $('audioOutput').hidden = true;
+  generateError('');
+  if (!voiceId) return generateError('Scegli prima la voce da usare (in alto, “Voce da usare”).');
+  if (!text.value.trim()) return generateError('Incolla prima il testo da trasformare in voce.');
+  if (!$('destroy').checked) return generateError('Spunta la conferma qui sopra: la GPU viene distrutta automaticamente a fine lavoro.');
   const payload = {
     voiceId, text: text.value, language: $('language').value, characters: text.value.length,
     hourlyRate: Number($('rate').value), minutes: Number($('minutes').value), safetyMinutes: 10,
@@ -170,11 +204,7 @@ $('generateButton').addEventListener('click', async () => {
   try {
     const response = await fetch('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
     const data = await response.json();
-    if (!response.ok) {
-      $('result').hidden = false;
-      $('result').innerHTML = `<h2>Controlla il job</h2><p>${escapeHtml(data.error)}</p>`;
-      return;
-    }
+    if (!response.ok) return generateError(data.error);
     currentJob = data.id;
     setBusy(true);
     const job = await followJob(data.id);
@@ -189,8 +219,7 @@ $('generateButton').addEventListener('click', async () => {
       loadHistory();
     }
   } catch {
-    $('result').hidden = false;
-    $('result').innerHTML = '<h2>Server non raggiungibile</h2><p>Chiudi e riapri START.bat, poi ricarica questa pagina. Al riavvio l’app distrugge eventuali GPU rimaste attive.</p>';
+    generateError('Server non raggiungibile: chiudi e riapri START.bat, poi ricarica questa pagina. Al riavvio l’app distrugge eventuali GPU rimaste attive.');
   } finally {
     currentJob = null;
     setBusy(false);
@@ -207,13 +236,27 @@ function duration(seconds) {
 
 const styleLabels = { photo: 'foto realistica', illustration: 'illustrazione', free: 'stile libero' };
 
+// Each entry is a collapsed row (badge, title, date) that opens on click; the
+// checkbox outside the <details> selects it for "Elimina selezionate".
+const openEntries = new Set();
+const selectedEntries = new Set();
+function historyShell(entry, badge, title, when, body) {
+  return `<div class="history-row">
+    <input type="checkbox" class="history-select" data-select="${entry.id}" aria-label="Seleziona"${selectedEntries.has(entry.id) ? ' checked' : ''} />
+    <details class="history-item" data-id="${entry.id}"${openEntries.has(entry.id) ? ' open' : ''}>
+      <summary class="history-head"><span class="badge">${badge}</span><b>${escapeHtml(title)}</b><span>${when}</span></summary>
+      <div class="history-body">${body}</div>
+    </details>
+  </div>`;
+}
+
 function imageHistoryItem(entry, base, when) {
   const shots = entry.images.map((name, index) => `<figure><a href="${base}/${name}" target="_blank" rel="noopener"><img src="${base}/${name}" alt="" loading="lazy" /></a>
     <figcaption><span>seed ${entry.seeds[index] ?? '?'}</span><a href="${base}/${name}?download">Scarica</a></figcaption></figure>`).join('');
   const meta = [`${entry.images.length} ${entry.images.length === 1 ? 'immagine' : 'immagini'}`, entry.width ? `${entry.width}×${entry.height}` : null,
     styleLabels[entry.style] || null, entry.cost != null ? `$${entry.cost}` : null, bytes(entry.bytes)].filter(Boolean).join(' · ');
-  return `<article class="history-item">
-    <div class="history-head"><b>Immagini</b><span>${when}</span></div>
+  const title = entry.prompt.length > 60 ? `${entry.prompt.slice(0, 60)}…` : entry.prompt;
+  return historyShell(entry, 'Immagini', title, `${when} · ${entry.images.length}`, `
     <p class="history-text">${escapeHtml(entry.prompt.length > 220 ? `${entry.prompt.slice(0, 220)}…` : entry.prompt)}</p>
     <div class="history-meta">${meta}</div>
     <div class="gallery">${shots}</div>
@@ -221,8 +264,7 @@ function imageHistoryItem(entry, base, when) {
       <a class="download" href="${base}/immagini.zip?download">Tutte (ZIP)</a>
       <button type="button" class="ghost" data-reuse-prompt="${entry.id}">Riusa il prompt</button>
       <button type="button" class="secondary" data-delete="${entry.id}">Elimina</button>
-    </div>
-  </article>`;
+    </div>`);
 }
 
 function percent(value) {
@@ -241,17 +283,18 @@ function trainingHistoryItem(entry, base, when) {
       return `<tr class="${Number(n) === entry.bestEpoch ? 'best' : ''}"><td>Epoca ${n}${Number(n) === entry.bestEpoch ? ' ★ salvata' : ''}</td><td>${percent(score.fidelity)}</td><td>${percent(score.similarity)}</td><td>${players(`epoca-${String(n).padStart(2, '0')}`)}</td></tr>`;
     })
   ].join('');
-  return `<article class="history-item">
-    <div class="history-head"><b>Addestramento · ${escapeHtml(entry.repo || '')}</b><span>${when}</span></div>
-    <div class="history-meta">${entry.clips} frasi (${entry.minutes} min) · ${entry.epochs} epoche · somiglianza misurata con WavLM rispetto alla tua voce vera</div>
+  return historyShell(entry, 'Addestramento', `${entry.epochs} epoche · ★ epoca ${entry.bestEpoch}`, when, `
+    <div class="history-meta">${escapeHtml(entry.repo || '')} · ${entry.clips} frasi (${entry.minutes} min) · ${entry.epochs} epoche · somiglianza misurata con WavLM rispetto alla tua voce vera</div>
     <div class="table-wrap"><table class="epochs"><thead><tr><th></th><th>Fedeltà al testo</th><th>Somiglianza a te</th><th>Ascolta</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="actions"><button type="button" class="secondary" data-delete="${entry.id}">Elimina</button></div>
-  </article>`;
+    <div class="actions"><button type="button" class="secondary" data-delete="${entry.id}">Elimina</button></div>`);
 }
 
 function renderHistory(allEntries) {
   const list = $('historyList');
   const entries = allEntries.filter((entry) => (currentTab === 'image' ? entry.kind === 'images' : entry.kind !== 'images'));
+  // Selections only make sense for what is on screen.
+  for (const id of selectedEntries) if (!entries.some((entry) => entry.id === id)) selectedEntries.delete(id);
+  $('historyToolbar').hidden = !entries.length;
   if (!entries.length) {
     list.innerHTML = `<p class="muted">Ancora nessuna ${currentTab === 'image' ? 'immagine' : 'generazione vocale'}.</p>`;
     return;
@@ -273,8 +316,7 @@ function renderHistory(allEntries) {
       entry.cost != null ? `$${entry.cost}` : null,
       bytes(entry.bytes)
     ].filter(Boolean).join(' · ');
-    return `<article class="history-item">
-      <div class="history-head"><b>${escapeHtml(entry.voiceName || 'Generazione')}</b><span>${when}</span></div>
+    return historyShell(entry, 'Voce', entry.voiceName || 'Generazione', `${when} · ${duration(entry.audioSeconds)}`, `
       ${preview}
       <div class="history-meta">${meta}</div>
       <audio controls preload="none" src="${base}/clova-voice.wav"></audio>
@@ -283,9 +325,19 @@ function renderHistory(allEntries) {
         ${entry.hasParts ? `<a class="download" href="${base}/clova-voice-blocchi.zip?download">Più file (ZIP)</a>` : ''}
         ${entry.text ? `<button type="button" class="ghost" data-reuse="${entry.id}">Riusa il testo</button>` : ''}
         <button type="button" class="secondary" data-delete="${entry.id}">Elimina</button>
-      </div>
-    </article>`;
+      </div>`);
   }).join('');
+  // Newest entry open the first time the list is shown.
+  if (!renderHistory.shown) list.querySelector('details.history-item').open = true;
+  renderHistory.shown = true;
+  list.querySelectorAll('details.history-item').forEach((item) => item.addEventListener('toggle', () => {
+    if (item.open) openEntries.add(item.dataset.id); else openEntries.delete(item.dataset.id);
+  }));
+  list.querySelectorAll('.history-select').forEach((box) => box.addEventListener('change', () => {
+    if (box.checked) selectedEntries.add(box.dataset.select); else selectedEntries.delete(box.dataset.select);
+    updateHistoryToolbar(entries);
+  }));
+  updateHistoryToolbar(entries);
   list.querySelectorAll('[data-reuse]').forEach((button) => button.addEventListener('click', () => {
     text.value = entries.find((entry) => entry.id === button.dataset.reuse).text;
     updateCharacters();
@@ -305,6 +357,36 @@ function renderHistory(allEntries) {
     loadHistory();
   }));
 }
+
+function updateHistoryToolbar(entries) {
+  const count = selectedEntries.size;
+  $('historySelectAll').checked = count > 0 && count === entries.length;
+  $('historySelectAll').indeterminate = count > 0 && count < entries.length;
+  $('historyDeleteSelected').disabled = !count;
+  $('historyDeleteSelected').textContent = count ? `Elimina selezionate (${count})` : 'Elimina selezionate';
+}
+
+$('historySelectAll').addEventListener('change', () => {
+  $('historyList').querySelectorAll('.history-select').forEach((box) => {
+    box.checked = $('historySelectAll').checked;
+    if (box.checked) selectedEntries.add(box.dataset.select); else selectedEntries.delete(box.dataset.select);
+  });
+  $('historyDeleteSelected').disabled = !selectedEntries.size;
+  $('historyDeleteSelected').textContent = selectedEntries.size ? `Elimina selezionate (${selectedEntries.size})` : 'Elimina selezionate';
+});
+
+$('historyDeleteSelected').addEventListener('click', async () => {
+  const ids = [...selectedEntries];
+  if (!ids.length || !confirm(`Eliminare definitivamente ${ids.length === 1 ? 'questa generazione' : `queste ${ids.length} generazioni`} dal PC?`)) return;
+  $('historyDeleteSelected').disabled = true;
+  const failed = [];
+  for (const id of ids) {
+    const response = await fetch(`/api/history/${id}`, { method: 'DELETE' }).catch(() => null);
+    if (response?.ok) selectedEntries.delete(id); else failed.push(id);
+  }
+  if (failed.length) alert(`Non sono riuscito a eliminarne ${failed.length}.`);
+  loadHistory();
+});
 
 let historyEntries = [];
 async function loadHistory() {

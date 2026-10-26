@@ -188,9 +188,21 @@ code { font: 13px ui-monospace, Consolas, monospace; color: #ffb27a; background:
 .history-list { display: grid; gap: 12px; margin-top: 18px; }
 .history-item { padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--glass-soft); transition: border-color .2s; }
 .history-item:hover { border-color: rgba(255, 122, 26, .3); }
-.history-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: baseline; }
-.history-head b { font-size: 16px; }
-.history-head span { color: var(--muted); font-size: 13px; }
+.history-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; }
+.history-select { accent-color: var(--orange); width: 18px; height: 18px; margin: 19px 0 0; cursor: pointer; }
+.history-head { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; cursor: pointer; list-style: none; }
+.history-head::-webkit-details-marker { display: none; }
+.history-head::after { content: "▸"; margin-left: auto; color: var(--orange); font-size: 14px; transition: transform .2s; }
+details[open] > .history-head::after { transform: rotate(90deg); }
+.history-head b { font-size: 16px; min-width: 0; overflow-wrap: anywhere; }
+.history-head span:not(.badge) { color: var(--muted); font-size: 13px; }
+.badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #1a0d03; background: var(--gradient); box-shadow: 0 4px 14px rgba(255, 90, 0, .25); }
+.history-body { margin-top: 6px; }
+.history-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 16px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; }
+.history-toolbar .check { margin: 0; }
+.history-toolbar button { padding: 9px 14px; font-size: 14px; }
+.history-toolbar button:disabled { opacity: .45; cursor: not-allowed; }
+.form-error { margin: 14px 0 0; padding: 12px 14px; border-radius: 12px; color: #ffd9c2; background: rgba(255, 90, 0, .14); border: 1px solid rgba(255, 122, 26, .5); font-weight: 600; }
 .history-text { margin: 8px 0 4px; color: #ddd4ca; font-size: 14px; line-height: 1.5; }
 .history-text.missing { color: var(--muted); font-style: italic; }
 .history-meta { color: var(--muted); font-size: 13px; }

@@ -88,7 +88,7 @@
           <label>Stabilità della lettura<select id="stability"><option value="natural">Naturale (più espressiva, più errori)</option><option value="stable" selected>Stabile (consigliata)</option><option value="very">Molto stabile (pochissimi errori, più piatta)</option></select><small>Meno variazione = meno doppie inventate e parole storpiate.</small></label>
           <label>Qualità<select id="quality"><option value="normal">Normale (1 tentativo per blocco)</option><option value="high">Alta (3 tentativi, sceglie il migliore)</option></select><small>Con “Alta” Whisper ascolta ogni tentativo e tiene quello più fedele al testo. Più lento.</small></label>
         </div>
-        <label>Lunghezza del campione<select id="refLength"><option value="short">Breve (~20 s): accento più naturale, timbro meno simile</option><option value="medium">Media (~40 s): compromesso</option><option value="full" selected>Completa (fino a 2 min): timbro più simile</option></select><small>Quanta parte della tua registrazione usa Qwen come modello. Se con testi nuovi sembri “straniero”, prova Breve o Media.</small></label>
+        <label id="refLengthLabel">Lunghezza del campione<select id="refLength"><option value="short">Breve (~20 s): accento più naturale, timbro meno simile</option><option value="medium">Media (~40 s): compromesso</option><option value="full" selected>Completa (fino a 2 min): timbro più simile</option></select><small>Quanta parte della tua registrazione usa Qwen come modello. Se con testi nuovi sembri “straniero”, prova Breve o Media.</small></label>
         <label>Velocità<select id="speed"><option value="0.8">80% (molto più lenta)</option><option value="0.85">85%</option><option value="0.9">90%</option><option value="0.95">95%</option><option value="1" selected>100% (come genera il modello)</option><option value="1.05">105%</option><option value="1.1">110% (più veloce)</option></select><small>Rallenta o accelera l’audio finale senza cambiare il tono della voce. Il modello imita il ritmo del campione: se parla troppo veloce, prova 85–90%.</small></label>
         <fieldset class="lifecycle">
           <legend>Quando ha finito</legend>
@@ -97,6 +97,7 @@
         </fieldset>
         <label class="check"><input id="destroy" type="checkbox" /> Confermo: la GPU e il suo disco verranno distrutti automaticamente (a fine lavoro o dopo 5 minuti), anche in caso di errore.</label>
         <div class="actions"><button type="button" id="generateButton">Genera con la voce selezionata</button><button type="button" id="cancelButton" class="secondary" hidden>Annulla e distruggi la GPU</button></div>
+        <p class="form-error" id="generateError" role="alert" hidden></p>
         <section class="progress-panel" id="jobProgress" hidden aria-live="polite">
           <div class="progress-heading"><strong id="jobTitle">Preparazione</strong><b id="jobPercent">0%</b></div>
           <div class="progress-track"><span id="jobBar"></span></div>
@@ -141,6 +142,7 @@
 
       <section class="card result" id="historyCard">
         <div class="heading"><h2>Cronologia</h2><p>Ogni generazione resta salvata sul PC finché non la elimini.</p></div>
+        <div class="history-toolbar" id="historyToolbar" hidden><label class="check"><input type="checkbox" id="historySelectAll" /> Seleziona tutte</label><button type="button" class="secondary" id="historyDeleteSelected" disabled>Elimina selezionate</button></div>
         <div class="history-list" id="historyList"><p class="muted">Caricamento…</p></div>
       </section>
       <section class="note"><b>Come funziona:</b> i profili vocali restano nella cartella dell’app. A ogni generazione viene noleggiata una GPU Vast, la voce viene sintetizzata, i file vengono scaricati sul PC e la GPU viene distrutta, subito o dopo 5 minuti se scegli di tenerla accesa. Il tasto “Distruggi istanza” in alto la spegne quando vuoi. Se chiudi l’app a metà, la GPU viene distrutta alla chiusura o al riavvio successivo.</section>
