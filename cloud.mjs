@@ -23,8 +23,8 @@ const IMAGE_LORAS = [
 ];
 // Edits (FLUX Kontext) keep the subject's body only with lighter LoRAs, and no gore.
 const IMAGE_EDIT_LORAS = [
-  'lustlyai/Flux_Lustly.ai_Uncensored_nsfw_v1:flux_lustly-ai_v1.safetensors:0.5',
-  'Keltezaa/NSFW_MASTER_FLUX:NSFW_master_Flux.safetensors:0.25'
+  'lustlyai/Flux_Lustly.ai_Uncensored_nsfw_v1:flux_lustly-ai_v1.safetensors:0.75',
+  'Keltezaa/NSFW_MASTER_FLUX:NSFW_master_Flux.safetensors:0.4'
 ];
 // What each kind of worker needs from a GPU. imageMB is the Docker image, extraMB what
 // the worker downloads at startup (FLUX weights), downloadGB what the host bills as traffic
