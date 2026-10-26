@@ -316,7 +316,8 @@ def take_score(wav: np.ndarray, sample_rate: int, target: str, language: str) ->
 
 def run_job(job_id: str, source: Path | None, reference_text: str, text: str, language: str, pause: float,
             temperature: float, top_p: float, takes: int, pronunciations: list[list[str]], speed: float,
-            ref_seconds: float, trained_repo: str = "", speaker: str = "", target_rate: float = 0.0) -> None:
+            ref_seconds: float, trained_repo: str = "", speaker: str = "", target_rate: float = 0.0,
+            chunk_chars: int = CHUNK_CHARS) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     sampling: dict[str, object] = {}
@@ -360,7 +361,7 @@ def run_job(job_id: str, source: Path | None, reference_text: str, text: str, la
                         max_new_tokens=2048, **sampling,
                     )
 
-            chunks = split_text(clean_text(text))
+            chunks = split_text(clean_text(text), chunk_chars)
             spoken = [apply_pronunciations(chunk, pronunciations) for chunk in chunks]
             job.update(status="generating", total=len(chunks), done=0, takes=takes)
             # With several takes per chunk, each copy is sampled independently in the
@@ -445,6 +446,7 @@ async def create_job(
     speed: float = Form(1.0),
     ref_seconds: float = Form(REF_MAX_SECONDS),
     target_rate: float = Form(0.0),
+    chunk_chars: int = Form(CHUNK_CHARS),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -479,7 +481,8 @@ async def create_job(
         target=run_job,
         args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5),
               min(max(top_p, 0), 1), min(max(takes, 1), 3), entries, min(max(speed, 0.7), 1.3),
-              min(max(ref_seconds, 10.0), REF_MAX_SECONDS), trained_repo, speaker, min(max(target_rate, 0.0), 12.0)),
+              min(max(ref_seconds, 10.0), REF_MAX_SECONDS), trained_repo, speaker, min(max(target_rate, 0.0), 12.0),
+              min(max(chunk_chars, 80), 600)),
         daemon=True,
     ).start()
     return {"id": job_id}

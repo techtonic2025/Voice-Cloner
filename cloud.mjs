@@ -188,7 +188,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     return null;
   }
 
-  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds }) {
+  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars }) {
     if (running) throw new Error('C’è già una generazione in corso. Attendi o annullala.');
     const job = {
       id: randomUUID(), status: 'searching', percent: 2, detail: 'Cerco una GPU adatta…',
@@ -201,7 +201,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    const options = { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds };
+    const options = { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars };
     run(job, controller.signal, options)
       .catch(async (error) => {
         // Some hosts cannot reach Hugging Face over HTTPS (broken certificates or a proxy):
@@ -308,7 +308,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     return current;
   }
 
-  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds }) {
+  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
     let current = null;
     let success = false;
@@ -355,6 +355,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       form.append('pronunciations', JSON.stringify(pronunciations || []));
       form.append('speed', String(speed || 1));
       form.append('ref_seconds', String(refSeconds || 120));
+      if (chunkChars) form.append('chunk_chars', String(chunkChars));
       const submitted = await worker('/jobs', { method: 'POST', body: form });
       const submittedData = await submitted.json();
       if (!submitted.ok) throw new Error(submittedData.detail || 'Il worker ha rifiutato il lavoro.');
