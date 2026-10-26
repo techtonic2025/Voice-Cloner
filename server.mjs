@@ -224,6 +224,37 @@ async function checkHfToken(token) {
   return { user: data.name, role: access.role || 'unknown', canWrite };
 }
 
+// Image tab settings: the Vast key lives in api.txt (as before), the credit and the
+// FLUX license checks next to it in data/settings.json.
+const SETTINGS = join(ROOT, 'data', 'settings.json');
+const FLUX_MODELS = { flux: 'black-forest-labs/FLUX.1-dev', kontext: 'black-forest-labs/FLUX.1-Kontext-dev' };
+
+async function readSettings() {
+  try { return JSON.parse((await readFile(SETTINGS, 'utf8')).replace(/^\uFEFF/, '')); } catch { return {}; }
+}
+
+async function vastKeySaved() {
+  if (process.env.VAST_API_KEY) return true;
+  try { return Boolean((await readFile(join(ROOT, 'api.txt'), 'utf8')).trim()); } catch { return false; }
+}
+
+async function checkVastKey(key) {
+  const response = await fetch('https://console.vast.ai/api/v0/users/current/', { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) });
+  if (!response.ok) throw new Error('Chiave Vast non valida.');
+  const data = await response.json();
+  return Number(data.credit ?? data.balance ?? 0);
+}
+
+// A gated file answers 200 (or a redirect) only once the license is accepted.
+async function checkLicenses(token) {
+  const licenses = {};
+  for (const [name, repo] of Object.entries(FLUX_MODELS)) {
+    const file = await fetch(`https://huggingface.co/${repo}/resolve/main/model_index.json`, { headers: { authorization: `Bearer ${token}` }, redirect: 'manual', signal: AbortSignal.timeout(15_000) }).catch(() => null);
+    licenses[name] = Boolean(file && file.status < 400);
+  }
+  return licenses;
+}
+
 async function listTrainingFiles() {
   await mkdir(TRAINING, { recursive: true });
   const entries = await readdir(TRAINING, { withFileTypes: true });
@@ -265,6 +296,34 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/voices') return send(res, 200, { voices: await listVoices(), limit: MAX_VOICES });
     if (req.method === 'GET' && url.pathname === '/api/pronunciations') return send(res, 200, { text: await readPronunciations() });
+
+    if (req.method === 'GET' && url.pathname === '/api/settings') {
+      const hf = await readHf();
+      return send(res, 200, {
+        vast: await vastKeySaved(), credit: (await readSettings()).credit ?? null,
+        hf: Boolean(hf.token), hfUser: hf.user || null, canWrite: Boolean(hf.canWrite), licenses: hf.licenses || {}
+      });
+    }
+    if (req.method === 'PUT' && url.pathname === '/api/settings/vast') {
+      const key = String((await body(req)).key || '').trim();
+      if (!/^[A-Za-z0-9]{32,}$/.test(key)) return send(res, 400, { error: 'La chiave Vast è una lunga sequenza di lettere e numeri: copiala da cloud.vast.ai → Account → API Keys.' });
+      let credit;
+      try { credit = await checkVastKey(key); } catch (error) { return send(res, 400, { error: error.message }); }
+      await writeFile(join(ROOT, 'api.txt'), key);
+      await mkdir(dirname(SETTINGS), { recursive: true });
+      await writeFile(SETTINGS, JSON.stringify({ ...(await readSettings()), credit }, null, 2));
+      return send(res, 200, { vast: true, credit });
+    }
+    if (req.method === 'PUT' && url.pathname === '/api/settings/hf') {
+      // Without a token: re-check the licenses of the saved one (after accepting them on the site).
+      const token = String((await body(req)).token || '').trim() || (await readHf()).token || '';
+      if (!/^hf_[A-Za-z0-9]{20,}$/.test(token)) return send(res, 400, { error: 'Il token Hugging Face inizia con “hf_”.' });
+      let info;
+      try { info = { ...(await checkHfToken(token)), licenses: await checkLicenses(token) }; } catch (error) { return send(res, 400, { error: error.message }); }
+      await mkdir(dirname(HF_SETTINGS), { recursive: true });
+      await writeFile(HF_SETTINGS, JSON.stringify({ token, ...info }, null, 2));
+      return send(res, 200, { hf: true, hfUser: info.user, licenses: info.licenses });
+    }
 
     if (req.method === 'GET' && url.pathname === '/api/hf') {
       const hf = await readHf();

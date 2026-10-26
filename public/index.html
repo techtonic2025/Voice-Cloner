@@ -110,7 +110,25 @@
       </div>
 
       <div id="tab-image" class="tab" hidden>
-        <section class="warning"><strong>Usa le immagini in modo responsabile.</strong> Nessun contenuto con minori, nessuna persona reale senza consenso. FLUX.1 [dev] è per uso personale e non commerciale.</section>
+        <section class="warning"><strong>Usa le immagini in modo responsabile.</strong> Nessun contenuto con minori, nessuna persona reale senza consenso. FLUX.1 [dev] e FLUX.1 Kontext [dev] sono solo per uso personale e non commerciale.</section>
+        <section class="card form" id="settingsCard"><details id="settingsDetails">
+          <summary class="card-toggle"><div class="heading"><h2>Impostazioni <span class="badge" id="settingsBadge">Da completare</span></h2><p>Chiave Vast per noleggiare le GPU e token Hugging Face per scaricare FLUX. Restano salvati solo su questo PC.</p></div></summary>
+          <h3>1. Chiave Vast.ai</h3>
+          <p class="helper">Su <a href="https://cloud.vast.ai/" target="_blank" rel="noopener">cloud.vast.ai</a>: crea l’account, carica almeno 5 $ (Billing), poi Account → <b>API Keys</b> → crea una chiave e incollala qui.</p>
+          <div class="actions"><input id="vastKey" class="token-input" type="password" autocomplete="off" placeholder="chiave Vast" /><button type="button" id="saveVast" class="ghost">Salva chiave</button></div>
+          <p class="muted" id="vastStatus"></p>
+          <h3>2. Token Hugging Face</h3>
+          <p class="helper">Su <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co → Settings → Access Tokens</a> crea un token di tipo <b>Read</b> e incollalo qui.</p>
+          <div class="actions"><input id="imageHfToken" class="token-input" type="password" autocomplete="off" placeholder="hf_…" /><button type="button" id="saveImageHf" class="ghost">Salva token</button></div>
+          <p class="muted" id="imageHfStatus"></p>
+          <h3>3. Licenze dei modelli</h3>
+          <p class="helper">Con lo stesso account Hugging Face apri le due pagine e accetta la licenza (pulsante in alto). Poi premi “Ricontrolla”.</p>
+          <ul class="licenses">
+            <li><a href="https://huggingface.co/black-forest-labs/FLUX.1-dev" target="_blank" rel="noopener">FLUX.1 [dev]</a> — per generare <span id="licenseFlux"></span></li>
+            <li><a href="https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev" target="_blank" rel="noopener">FLUX.1 Kontext [dev]</a> — per modificare <span id="licenseKontext"></span></li>
+          </ul>
+          <div class="actions"><button type="button" id="recheckHf" class="ghost">Ricontrolla le licenze</button></div>
+        </details></section>
         <section class="card form" id="imageCard">
           <div class="heading"><h2>Genera immagini</h2><p>Descrivi cosa vuoi vedere. FLUX capisce meglio l’inglese, ma funziona anche in italiano.</p></div>
           <div class="edit-source" id="editSource" hidden>

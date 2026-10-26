@@ -404,6 +404,7 @@ function showTab() {
   $('tab-voice').hidden = currentTab !== 'voice';
   $('tab-image').hidden = currentTab !== 'image';
   $('heroWord').textContent = currentTab === 'image' ? 'Image' : 'Voice';
+  document.title = currentTab === 'image' ? 'Clova Image' : 'Clova Voice';
   $('heroPill').textContent = currentTab === 'image' ? 'Le tue immagini, senza abbonamenti' : 'Le tue voci, sul tuo PC';
   $('heroText').textContent = currentTab === 'image'
     ? 'Foto realistiche e illustrazioni con FLUX su una GPU noleggiata al minuto: descrivi l’immagine, scegli formato e varianti, scarica.'
@@ -414,6 +415,47 @@ function showTab() {
 window.addEventListener('hashchange', showTab);
 showTab();
 loadHistory();
+
+// Image tab settings: Vast key, Hugging Face token and the two FLUX licenses, as in the
+// public Clova Image. The card stays open until everything is in place.
+let settings = { vast: false, hf: false, licenses: {} };
+
+function renderSettings() {
+  const ready = settings.vast && settings.hf && settings.licenses.flux;
+  $('settingsBadge').textContent = ready ? 'Pronto' : 'Da completare';
+  if (!ready) $('settingsDetails').open = true;
+  $('vastStatus').textContent = settings.vast
+    ? `Chiave salvata ✓${settings.credit != null ? ` · credito $${Number(settings.credit).toFixed(2)}` : ''}` : 'Nessuna chiave salvata.';
+  $('imageHfStatus').textContent = settings.hf ? `Token salvato ✓ · utente ${settings.hfUser}` : 'Nessun token salvato.';
+  const mark = (ok) => (!settings.hf ? '' : ok ? '✓ accettata' : '✗ da accettare');
+  $('licenseFlux').textContent = mark(settings.licenses.flux);
+  $('licenseKontext').textContent = mark(settings.licenses.kontext);
+}
+
+async function loadSettings() {
+  settings = await (await fetch('/api/settings')).json();
+  renderSettings();
+}
+
+async function saveSetting(path, payload, status) {
+  $(status).textContent = 'Verifica…';
+  const response = await fetch(path, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+  const data = await response.json();
+  if (!response.ok) { $(status).textContent = data.error; return; }
+  await loadSettings();
+  loadHf().catch(() => {});
+}
+
+$('saveVast').addEventListener('click', async () => {
+  await saveSetting('/api/settings/vast', { key: $('vastKey').value }, 'vastStatus');
+  $('vastKey').value = '';
+});
+$('saveImageHf').addEventListener('click', async () => {
+  await saveSetting('/api/settings/hf', { token: $('imageHfToken').value }, 'imageHfStatus');
+  $('imageHfToken').value = '';
+});
+$('recheckHf').addEventListener('click', () => saveSetting('/api/settings/hf', {}, 'imageHfStatus'));
+loadSettings().catch(() => {});
 
 // Image generation with FLUX.
 const imageTitles = { searching: 'Ricerca GPU', creating: 'Noleggio GPU', booting: 'Avvio GPU', loading: 'Preparazione FLUX', uploading: 'Invio richiesta', generating: 'Generazione', downloading: 'Download', destroying: 'Distruzione GPU', done: 'Completato', error: 'Errore' };

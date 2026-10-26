@@ -242,3 +242,6 @@ details[open] > .history-head::after { transform: rotate(90deg); }
   .actions button, .downloads .download { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.licenses { margin: 10px 0; padding-left: 20px; color: var(--muted); font-size: 14px; }
+.licenses li { margin: 6px 0; }
+.licenses span { color: #e8e1d9; font-weight: 600; }
