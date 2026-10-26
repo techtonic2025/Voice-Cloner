@@ -4,6 +4,10 @@ Flow: at startup the weights are downloaded from Hugging Face (gated repo: the
 user accepts the license and the app passes HF_TOKEN) and loaded in bf16; the
 orchestrator polls /health until ready, submits /images, polls /images/{id}
 and downloads the PNG files.
+
+A request with an image attached is an edit: FLUX.1 Kontext [dev] is downloaded on
+the first one (transformer only, the rest is shared with FLUX.1-dev) and the two
+transformers take turns on the GPU, the idle one waiting in system RAM.
 """
 
 from __future__ import annotations
@@ -14,16 +18,19 @@ import tempfile
 import threading
 import time
 import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import torch
-from diffusers import FluxPipeline
-from fastapi import FastAPI, Form, Header, HTTPException
+from diffusers import FluxKontextPipeline, FluxPipeline, FluxTransformer2DModel
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from huggingface_hub import hf_hub_download, snapshot_download
+from PIL import Image
 
 app = FastAPI(title="Clova Voice FLUX worker", docs_url=None, redoc_url=None)
 PIPE: FluxPipeline | None = None
+KONTEXT: FluxKontextPipeline | None = None
 PHASE = "starting"
 LOAD_ERROR: str | None = None
 GPU_LOCK = threading.Lock()
@@ -33,6 +40,9 @@ MODEL_DIR = Path(os.getenv("FLUX_DIR", "/models/flux1-dev"))
 ALLOW = ["model_index.json", "scheduler/*", "text_encoder/*", "text_encoder_2/*",
          "tokenizer/*", "tokenizer_2/*", "transformer/*", "vae/*"]
 EXPECTED_BYTES = 33.7e9
+KONTEXT_REPO = os.getenv("KONTEXT_REPO", "black-forest-labs/FLUX.1-Kontext-dev")
+KONTEXT_DIR = Path(os.getenv("KONTEXT_DIR", "/models/flux1-kontext-dev"))
+KONTEXT_BYTES = 23.8e9
 # LoRAs fused at startup, "repo:file:scale" separated by commas (set by the app; empty = plain FLUX).
 LORAS = [entry.split(":") for entry in os.getenv("FLUX_LORAS", "").split(",") if entry.count(":") == 2]
 LORA_ERROR: str | None = None
@@ -70,7 +80,7 @@ def load_model() -> None:
         PHASE = "error"
 
 
-def load_loras(pipe: FluxPipeline) -> None:
+def load_loras(pipe: FluxPipeline | FluxKontextPipeline) -> None:
     """Fuse the LoRAs into the weights, so generation runs as fast as plain FLUX.
     A LoRA that fails to load is reported in /health and skipped: base FLUX still works."""
     global LORA_ERROR
@@ -109,18 +119,74 @@ def health() -> dict[str, object]:
     }
 
 
+def kontext_downloaded() -> int:
+    return sum(path.stat().st_size for path in KONTEXT_DIR.rglob("*") if path.is_file()) if KONTEXT_DIR.exists() else 0
+
+
+def kontext_pipeline(job: dict) -> FluxKontextPipeline:
+    """Built on the first edit, sharing text encoders and VAE with FLUX.1-dev."""
+    global KONTEXT
+    if KONTEXT is None:
+        job.update(status="preparing", download=0.0)
+        watcher = threading.Event()
+
+        def progress() -> None:
+            while not watcher.wait(3):
+                job["download"] = round(min(1.0, kontext_downloaded() / KONTEXT_BYTES), 3)
+
+        threading.Thread(target=progress, daemon=True).start()
+        try:
+            snapshot_download(KONTEXT_REPO, local_dir=KONTEXT_DIR, allow_patterns=["transformer/*"],
+                              token=os.getenv("HF_TOKEN") or None)
+        except Exception as exc:
+            message = str(exc)
+            if any(code in message for code in ("401", "403")) or "gated" in message.lower():
+                raise RuntimeError("Accesso a FLUX.1-Kontext-dev negato: accetta la licenza su "
+                                   "huggingface.co/black-forest-labs/FLUX.1-Kontext-dev con il tuo account.") from exc
+            raise
+        finally:
+            watcher.set()
+        job.update(status="generating", download=None)
+        transformer = FluxTransformer2DModel.from_pretrained(KONTEXT_DIR / "transformer", torch_dtype=torch.bfloat16)
+        PIPE.transformer.to("cpu")
+        torch.cuda.empty_cache()
+        KONTEXT = FluxKontextPipeline(
+            transformer=transformer.to("cuda"), scheduler=PIPE.scheduler, vae=PIPE.vae,
+            text_encoder=PIPE.text_encoder, tokenizer=PIPE.tokenizer,
+            text_encoder_2=PIPE.text_encoder_2, tokenizer_2=PIPE.tokenizer_2,
+        )
+        load_loras(KONTEXT)
+    return KONTEXT
+
+
+def on_gpu(wanted: FluxTransformer2DModel, idle: FluxTransformer2DModel | None) -> None:
+    """Only one 24 GB transformer fits next to the shared encoders: swap through system RAM."""
+    if idle is not None and idle.device.type == "cuda":
+        idle.to("cpu")
+        torch.cuda.empty_cache()
+    if wanted.device.type != "cuda":
+        wanted.to("cuda")
+
+
 def run_job(job_id: str, prompt: str, width: int, height: int, count: int, seed: int,
-            steps: int, guidance: float) -> None:
+            steps: int, guidance: float, source: Image.Image | None = None) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     try:
         with GPU_LOCK:
+            if source is not None:
+                pipe = kontext_pipeline(job)
+                on_gpu(pipe.transformer, PIPE.transformer)
+            else:
+                pipe = PIPE
+                on_gpu(PIPE.transformer, KONTEXT.transformer if KONTEXT else None)
             job.update(status="generating", total=count, done=0)
             seeds = []
             for index in range(count):
                 image_seed = seed + index
-                image = PIPE(
-                    prompt=prompt, width=width, height=height, num_inference_steps=steps,
+                size = {"image": source} if source is not None else {"width": width, "height": height}
+                image = pipe(
+                    prompt=prompt, num_inference_steps=steps, **size,
                     guidance_scale=guidance, max_sequence_length=512,
                     generator=torch.Generator("cuda").manual_seed(image_seed),
                 ).images[0]
@@ -132,6 +198,7 @@ def run_job(job_id: str, prompt: str, width: int, height: int, count: int, seed:
             for index, image_seed in enumerate(seeds, start=1):
                 archive.write(folder / f"img-{index}.png", f"immagine-{index}-seed{image_seed}.png")
             archive.writestr("prompt.txt", prompt)
+        width, height = image.size
         job.update(status="done", seeds=seeds, width=width, height=height,
                    elapsed=round(time.time() - job["started"], 1))
     except Exception as exc:
@@ -148,7 +215,8 @@ def create_job(
     count: int = Form(1),
     seed: int = Form(-1),
     steps: int = Form(28),
-    guidance: float = Form(3.5),
+    guidance: float = Form(-1),
+    image: UploadFile | None = File(None),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -160,6 +228,9 @@ def create_job(
     # FLUX works on multiples of 16 pixels.
     width, height = (min(max(256, value // 16 * 16), 2048) for value in (width, height))
     seed = seed if seed >= 0 else secrets.randbelow(2**31)
+    source = Image.open(BytesIO(image.file.read())).convert("RGB") if image is not None else None
+    # Kontext follows edit instructions best at a lower guidance than text-to-image.
+    guidance = guidance if guidance > 0 else (2.5 if source is not None else 3.5)
 
     job_id = secrets.token_hex(12)
     (WORK_DIR / job_id).mkdir(parents=True)
@@ -167,7 +238,7 @@ def create_job(
     threading.Thread(
         target=run_job,
         args=(job_id, prompt, width, height, min(max(count, 1), 4), seed,
-              min(max(steps, 8), 50), min(max(guidance, 1.0), 10.0)),
+              min(max(steps, 8), 50), min(max(guidance, 1.0), 10.0), source),
         daemon=True,
     ).start()
     return {"id": job_id}

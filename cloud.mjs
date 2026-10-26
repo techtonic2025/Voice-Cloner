@@ -26,7 +26,7 @@ const IMAGE_LORAS = [
 // (measured on Vast invoices: some hosts charge up to $0.04/GB, more than the GPU itself).
 const WORKERS = {
   voice: { image: IMAGE, minGpuRam: 16_000, disk: 40, imageMB: 10_500, extraMB: 0, loadMB: 4_500, downloadGB: 10, loadTimeoutMs: 10 * 60_000 },
-  images: { image: IMAGE_FLUX, minGpuRam: 45_000, disk: 90, imageMB: 7_000, extraMB: 34_000, loadMB: 34_000, downloadGB: 30, loadTimeoutMs: 30 * 60_000 }
+  images: { image: IMAGE_FLUX, minGpuRam: 45_000, minCpuRam: 64_000, disk: 110, imageMB: 7_000, extraMB: 34_000, loadMB: 34_000, downloadGB: 30, loadTimeoutMs: 30 * 60_000 }
 };
 const BOOT_TIMEOUT_MS = 20 * 60_000;
 const KEEP_ALIVE_MS = Number(process.env.CLOVA_KEEP_ALIVE_MS) || 5 * 60_000;
@@ -134,7 +134,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         verified: { eq: true }, rentable: { eq: true }, rented: { eq: false },
         num_gpus: { eq: 1 }, gpu_ram: { gte: minGpuRam }, compute_cap: { gte: 800, lte: 900 },
         cuda_max_good: { gte: 12.6 }, reliability: { gte: 0.98 },
-        inet_down: { gte: 1000 }, disk_bw: { gte: 1000 }, disk_space: { gte: profile.disk }, direct_port_count: { gte: 1 },
+        inet_down: { gte: 1000 }, disk_bw: { gte: 1000 }, disk_space: { gte: profile.disk }, cpu_ram: { gte: profile.minCpuRam || 0 }, direct_port_count: { gte: 1 },
         dph_total: { lte: maxRate }, order: [['dlperf', 'desc']]
       }
     });
@@ -553,7 +553,8 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
   }
 
   // Images: FLUX on a 45 GB+ GPU, same keep-alive and destruction rules as voice jobs.
-  function startImageJob({ prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, budgetCap, keepAlive }) {
+  // With `source` (a PNG from the history) the job is an edit made with FLUX Kontext.
+  function startImageJob({ prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, budgetCap, keepAlive, source }) {
     if (running) throw new Error('C’è già un lavoro in corso. Attendi o annullalo.');
     const job = {
       id: randomUUID(), kind: 'images', status: 'searching', percent: 2, detail: 'Cerco una GPU da almeno 45 GB…',
@@ -565,13 +566,13 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    runImages(job, controller.signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive })
+    runImages(job, controller.signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source })
       .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
       .finally(() => { clearTimeout(watchdog); running = null; });
     return job;
   }
 
-  async function runImages(job, signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive }) {
+  async function runImages(job, signal, { prompt, fullPrompt, style, format, width, height, count, seed, steps, maxRate, keepAlive, source }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
     let current = null;
     let success = false;
@@ -599,6 +600,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       form.append('count', String(count));
       form.append('seed', String(seed ?? -1));
       form.append('steps', String(steps));
+      if (source) form.append('image', new Blob([await readFile(source.path)], { type: 'image/png' }), 'source.png');
       const submitted = await worker('/images', { method: 'POST', body: form });
       const submittedData = await submitted.json();
       if (!submitted.ok) throw new Error(submittedData.detail || 'Il worker ha rifiutato la richiesta.');
@@ -610,8 +612,12 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         remote = await (await worker(`/images/${submittedData.id}`)).json();
         if (remote.status === 'error') throw new Error(remote.error);
         if (remote.status === 'done') break;
+        if (remote.status === 'preparing') {
+          set('generating', 52, `Prima modifica su questa GPU: download di FLUX Kontext ${Math.round((remote.download || 0) * 100)}%…`);
+          continue;
+        }
         set('generating', 55 + Math.round(((remote.done || 0) / (remote.total || count)) * 35),
-          `Generazione con FLUX: immagine ${Math.min((remote.done || 0) + 1, remote.total || count)} di ${remote.total || count}…`);
+          `${source ? 'Modifica con FLUX Kontext' : 'Generazione con FLUX'}: immagine ${Math.min((remote.done || 0) + 1, remote.total || count)} di ${remote.total || count}…`);
       }
 
       set('downloading', 92, 'Download delle immagini…');
@@ -628,7 +634,8 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       // Saved next to the files so the history survives app restarts.
       await writeFile(join(folder, 'meta.json'), JSON.stringify({
         id: job.id, kind: 'images', createdAt: new Date(job.startedAt).toISOString(), prompt, style, format,
-        width: remote.width, height: remote.height, steps, seeds: remote.seeds, images: job.images, gpu: job.gpu, cost: job.cost
+        width: remote.width, height: remote.height, steps, seeds: remote.seeds, images: job.images, gpu: job.gpu, cost: job.cost,
+        ...(source ? { editedFrom: { id: source.id, name: source.name } } : {})
       }, null, 2));
       success = true;
     } finally {

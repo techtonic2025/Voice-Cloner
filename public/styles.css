@@ -171,6 +171,13 @@ code { font: 13px ui-monospace, Consolas, monospace; color: #ffb27a; background:
 .gallery img { display: block; width: 100%; height: auto; cursor: zoom-in; }
 .gallery figcaption { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; color: var(--muted); }
 .gallery figcaption a { color: #ffb27a; font-weight: 600; text-decoration: none; }
+.gallery figcaption button.link { all: unset; color: #ffb27a; font-weight: 600; cursor: pointer; margin-right: 8px; }
+.gallery figcaption button.link:hover { text-decoration: underline; }
+.edit-source { display: flex; align-items: center; gap: 14px; padding: 12px; margin-bottom: 14px; border: 1px solid rgba(255, 122, 26, .45); border-radius: 14px; background: var(--orange-soft); }
+.edit-source img { width: 72px; height: 72px; object-fit: cover; border-radius: 10px; flex: none; }
+.edit-source div { display: flex; flex-direction: column; gap: 4px; flex: 1; font-size: 14px; }
+.edit-source span { color: var(--muted); font-size: 13px; }
+@media (max-width: 600px) { .edit-source { flex-wrap: wrap; } }
 .history-item .gallery { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; margin: 10px 0; }
 
 /* Training comparison */

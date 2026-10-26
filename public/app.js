@@ -252,11 +252,11 @@ function historyShell(entry, badge, title, when, body) {
 
 function imageHistoryItem(entry, base, when) {
   const shots = entry.images.map((name, index) => `<figure><a href="${base}/${name}" target="_blank" rel="noopener"><img src="${base}/${name}" alt="" loading="lazy" /></a>
-    <figcaption><span>seed ${entry.seeds[index] ?? '?'}</span><a href="${base}/${name}?download">Scarica</a></figcaption></figure>`).join('');
+    <figcaption><span>seed ${entry.seeds[index] ?? '?'}</span><span><button type="button" class="link" data-edit="${entry.id}" data-name="${name}">Modifica</button> <a href="${base}/${name}?download">Scarica</a></span></figcaption></figure>`).join('');
   const meta = [`${entry.images.length} ${entry.images.length === 1 ? 'immagine' : 'immagini'}`, entry.width ? `${entry.width}×${entry.height}` : null,
     styleLabels[entry.style] || null, entry.cost != null ? `$${entry.cost}` : null, bytes(entry.bytes)].filter(Boolean).join(' · ');
   const title = entry.prompt.length > 60 ? `${entry.prompt.slice(0, 60)}…` : entry.prompt;
-  return historyShell(entry, 'Immagini', title, `${when} · ${entry.images.length}`, `
+  return historyShell(entry, entry.editedFrom ? 'Modifica' : 'Immagini', title, `${when} · ${entry.images.length}`, `
     <p class="history-text">${escapeHtml(entry.prompt.length > 220 ? `${entry.prompt.slice(0, 220)}…` : entry.prompt)}</p>
     <div class="history-meta">${meta}</div>
     <div class="gallery">${shots}</div>
@@ -419,12 +419,35 @@ loadHistory();
 const imageTitles = { searching: 'Ricerca GPU', creating: 'Noleggio GPU', booting: 'Avvio GPU', loading: 'Preparazione FLUX', uploading: 'Invio richiesta', generating: 'Generazione', downloading: 'Download', destroying: 'Distruzione GPU', done: 'Completato', error: 'Errore' };
 let imageJob = null;
 
+// Editing: the "Modifica" button under an image (history or last result) makes it the source.
+let editSource = null;
+function setEditSource(source) {
+  editSource = source;
+  $('editSource').hidden = !source;
+  if (source) $('editThumb').src = `/api/jobs/${source.id}/files/${source.name}`;
+  $('imageStyle').disabled = $('imageFormat').disabled = !!source;
+  $('imageButton').textContent = source ? 'Modifica immagine' : 'Genera immagini';
+  $('imagePrompt').placeholder = source ? 'Es. make her nude, keep the same face, pose and background'
+    : 'Es. a cozy home studio with a microphone and orange neon lights, evening';
+}
+$('editClear').addEventListener('click', () => setEditSource(null));
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-edit]');
+  if (!button) return;
+  setEditSource({ id: button.dataset.edit, name: button.dataset.name });
+  $('imagePrompt').value = '';
+  location.hash = '#image';
+  $('imageCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  $('imagePrompt').focus({ preventScroll: true });
+});
+
 $('imageButton').addEventListener('click', async () => {
   $('imageOutput').hidden = true;
   const payload = {
     prompt: $('imagePrompt').value, style: $('imageStyle').value, format: $('imageFormat').value,
     count: Number($('imageCount').value), quality: $('imageQuality').value, seed: $('imageSeed').value,
-    confirmDestroy: $('imageConfirm').checked, keepAlive: document.querySelector('input[name="imageLifecycle"]:checked').value === 'keep'
+    confirmDestroy: $('imageConfirm').checked, keepAlive: document.querySelector('input[name="imageLifecycle"]:checked').value === 'keep',
+    ...(editSource ? { source: editSource } : {})
   };
   const response = await fetch('/api/images', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
   const data = await response.json();
@@ -444,7 +467,7 @@ $('imageButton').addEventListener('click', async () => {
       if (job.status === 'done') {
         const base = `/api/jobs/${job.id}/files`;
         $('imageGallery').innerHTML = job.images.map((name, index) => `<figure><a href="${base}/${name}" target="_blank" rel="noopener"><img src="${base}/${name}" alt="" /></a>
-          <figcaption><span>seed ${job.seeds[index]}</span><a href="${base}/${name}?download">Scarica</a></figcaption></figure>`).join('');
+          <figcaption><span>seed ${job.seeds[index]}</span><span><button type="button" class="link" data-edit="${job.id}" data-name="${name}">Modifica</button> <a href="${base}/${name}?download">Scarica</a></span></figcaption></figure>`).join('');
         $('imageZip').href = `${base}/immagini.zip?download`;
         $('imageInfo').textContent = `${job.images.length} immagini · ${job.width}×${job.height} · costo GPU stimato $${job.cost}`;
         $('imageOutput').hidden = false;

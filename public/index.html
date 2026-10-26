@@ -113,6 +113,11 @@
         <section class="warning"><strong>Usa le immagini in modo responsabile.</strong> Nessun contenuto con minori, nessuna persona reale senza consenso. FLUX.1 [dev] è per uso personale e non commerciale.</section>
         <section class="card form" id="imageCard">
           <div class="heading"><h2>Genera immagini</h2><p>Descrivi cosa vuoi vedere. FLUX capisce meglio l’inglese, ma funziona anche in italiano.</p></div>
+          <div class="edit-source" id="editSource" hidden>
+            <img id="editThumb" alt="" />
+            <div><b>Stai modificando questa immagine</b><span>Scrivi cosa cambiare, in inglese, es. “make her nude, keep the same face, pose and background”. Il resto resta uguale.</span></div>
+            <button type="button" class="ghost" id="editClear">Annulla modifica</button>
+          </div>
           <label>Descrizione<textarea id="imagePrompt" rows="5" placeholder="Es. a cozy home studio with a microphone and orange neon lights, evening"></textarea></label>
           <div class="two">
             <label>Stile<select id="imageStyle"><option value="photo">Foto realistica</option><option value="illustration">Illustrazione</option><option value="free">Libero (solo la tua descrizione)</option></select></label>

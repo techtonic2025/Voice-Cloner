@@ -184,7 +184,7 @@ async function historyEntry(id) {
     return {
       id, kind: 'images', createdAt: meta.createdAt, prompt: meta.prompt, style: meta.style, format: meta.format,
       width: meta.width, height: meta.height, seeds: meta.seeds || [], images: meta.images || [], cost: meta.cost ?? null,
-      bytes: sizes.reduce((sum, size) => sum + size, 0)
+      editedFrom: meta.editedFrom || null, bytes: sizes.reduce((sum, size) => sum + size, 0)
     };
   }
   const audio = await stat(join(folder, 'clova-voice.wav')).catch(() => null);
@@ -424,9 +424,20 @@ const server = createServer(async (req, res) => {
       const format = IMAGE_FORMATS[input.format] ? input.format : 'square';
       const [width, height] = IMAGE_FORMATS[format];
       const seed = Number.isInteger(Number(input.seed)) && String(input.seed).trim() !== '' ? Math.max(0, Number(input.seed)) : -1;
+      // Edits start only from images this app generated (history), never from uploaded photos.
+      let source = null;
+      if (input.source) {
+        const id = String(input.source.id || '');
+        const name = String(input.source.name || '');
+        if (!/^[a-f0-9-]{36}$/i.test(id) || !/^img-[1-4]\.png$/.test(name)) return send(res, 400, { error: 'Immagine da modificare non valida.' });
+        const entry = await historyEntry(id);
+        if (entry?.kind !== 'images' || !entry.images.includes(name)) return send(res, 400, { error: 'L’immagine da modificare non è più nella cronologia.' });
+        source = { id, name, path: join(cloud.outputsDir, id, name) };
+      }
       try {
         const job = cloud.startImageJob({
-          prompt, fullPrompt: prompt + IMAGE_STYLES[style], style, format, width, height,
+          // An edit is an instruction ("make the sky red"): no style suffix appended.
+          prompt, fullPrompt: source ? prompt : prompt + IMAGE_STYLES[style], style, format, width, height, source,
           count: Math.min(4, Math.max(1, Number(input.count) || 1)), seed,
           steps: { fast: 20, normal: 28, max: 40 }[input.quality] || 28,
           maxRate: Math.min(5, Math.max(0.2, Number(input.hourlyRate) || 1)),
