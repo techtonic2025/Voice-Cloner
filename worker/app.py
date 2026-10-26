@@ -214,18 +214,40 @@ def split_text(text: str, limit: int = CHUNK_CHARS) -> list[str]:
     return chunks
 
 
-def trim_silence(wav: np.ndarray, sample_rate: int, keep: float = 0.05) -> np.ndarray:
-    """Cut the silence the model leaves before and after a chunk, so the gap between
-    chunks is only the chosen pause."""
+def voiced_frames(wav: np.ndarray, sample_rate: int) -> tuple[np.ndarray, int]:
+    """Per 10 ms frame: is there speech? (Energy above 3% of the loudest frame.)"""
     frame = int(sample_rate * 0.01)
-    if len(wav) < frame * 10:
-        return wav
     energy = np.sqrt(np.mean(wav[: len(wav) // frame * frame].reshape(-1, frame) ** 2, axis=1))
-    voiced = np.flatnonzero(energy > max(energy.max() * 0.03, 1e-4))
-    if not len(voiced):
+    return energy > max(energy.max(initial=0) * 0.03, 1e-4), frame
+
+
+def longest_pause(wav: np.ndarray, sample_rate: int) -> float:
+    """Longest silence inside the speech, in seconds."""
+    voiced, frame = voiced_frames(wav, sample_rate)
+    index = np.flatnonzero(voiced)
+    return float(np.diff(index).max(initial=1) - 1) * frame / sample_rate if len(index) > 1 else 0.0
+
+
+def trim_silence(wav: np.ndarray, sample_rate: int, keep: float = 0.05, max_pause: float = 0.7) -> np.ndarray:
+    """Cut the silence the model leaves before and after a chunk, so the gap between
+    chunks is only the chosen pause, and shorten the occasional multi-second stop
+    the model drops between sentences to max_pause."""
+    if len(wav) < sample_rate * 0.1:
+        return wav
+    voiced, frame = voiced_frames(wav, sample_rate)
+    index = np.flatnonzero(voiced)
+    if not len(index):
         return wav
     margin = int(sample_rate * keep)
-    return wav[max(voiced[0] * frame - margin, 0): min((voiced[-1] + 1) * frame + margin, len(wav))]
+    pieces = []
+    start = max(index[0] * frame - margin, 0)
+    for before, after in zip(index[:-1], index[1:]):
+        if (after - before) * frame > max_pause * sample_rate:
+            half = int(max_pause * sample_rate / 2)
+            pieces.append(wav[start:(before + 1) * frame + half])
+            start = after * frame - half
+    pieces.append(wav[start:min((index[-1] + 1) * frame + margin, len(wav))])
+    return np.concatenate(pieces)
 
 
 def apply_pronunciations(text: str, entries: list[list[str]]) -> str:
@@ -259,6 +281,9 @@ def take_score(wav: np.ndarray, sample_rate: int, target: str, language: str) ->
     # Runaway takes (babbling, long silences) run far longer than ~15 characters per second.
     if len(wav) / sample_rate > max(4.0, len(target) / 15 * 2.2):
         score *= 0.8
+    # A take that stops for seconds mid-text sounds broken even after the pause is shortened.
+    if longest_pause(wav, sample_rate) > 1.5:
+        score *= 0.85
     return score
 
 
