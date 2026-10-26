@@ -185,32 +185,47 @@ def change_speed(wav: np.ndarray, speed: float) -> np.ndarray:
 
 
 def split_text(text: str, limit: int = CHUNK_CHARS) -> list[str]:
-    """Split into chunks of whole sentences that never cross a paragraph, so each
-    chunk keeps one coherent intonation; overlong sentences fall back to commas."""
+    """Split into chunks of whole sentences. Blank lines are read straight through
+    (a paragraph without final punctuation gets a period); overlong sentences fall
+    back to commas."""
     chunks: list[str] = []
-    for paragraph in re.split(r"\n\s*\n", text.strip()):
-        paragraph = re.sub(r"\s+", " ", paragraph).strip()
-        current = ""
-        for sentence in re.split(r"(?<=[.!?…;:])\s+", paragraph):
-            if not sentence:
-                continue
-            pieces = [sentence]
-            if len(sentence) > limit:
-                pieces = [p.strip() for p in re.split(r"(?<=[,])\s+", sentence) if p.strip()]
-            for piece in pieces:
-                while len(piece) > limit:
-                    cut = piece.rfind(" ", 0, limit)
-                    cut = cut if cut > limit // 2 else limit
-                    chunks.append(piece[:cut].strip())
-                    piece = piece[cut:].strip()
-                if current and len(current) + 1 + len(piece) > limit:
-                    chunks.append(current)
-                    current = piece
-                else:
-                    current = f"{current} {piece}".strip()
-        if current:
-            chunks.append(current)
+    paragraphs = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n\s*\n", text.strip())]
+    flowing = " ".join(p if p[-1] in ".!?…;:" else p + "." for p in paragraphs if p)
+    current = ""
+    for sentence in re.split(r"(?<=[.!?…;:])\s+", flowing):
+        if not sentence:
+            continue
+        pieces = [sentence]
+        if len(sentence) > limit:
+            pieces = [p.strip() for p in re.split(r"(?<=[,])\s+", sentence) if p.strip()]
+        for piece in pieces:
+            while len(piece) > limit:
+                cut = piece.rfind(" ", 0, limit)
+                cut = cut if cut > limit // 2 else limit
+                chunks.append(piece[:cut].strip())
+                piece = piece[cut:].strip()
+            if current and len(current) + 1 + len(piece) > limit:
+                chunks.append(current)
+                current = piece
+            else:
+                current = f"{current} {piece}".strip()
+    if current:
+        chunks.append(current)
     return chunks
+
+
+def trim_silence(wav: np.ndarray, sample_rate: int, keep: float = 0.05) -> np.ndarray:
+    """Cut the silence the model leaves before and after a chunk, so the gap between
+    chunks is only the chosen pause."""
+    frame = int(sample_rate * 0.01)
+    if len(wav) < frame * 10:
+        return wav
+    energy = np.sqrt(np.mean(wav[: len(wav) // frame * frame].reshape(-1, frame) ** 2, axis=1))
+    voiced = np.flatnonzero(energy > max(energy.max() * 0.03, 1e-4))
+    if not len(voiced):
+        return wav
+    margin = int(sample_rate * keep)
+    return wav[max(voiced[0] * frame - margin, 0): min((voiced[-1] + 1) * frame + margin, len(wav))]
 
 
 def apply_pronunciations(text: str, entries: list[list[str]]) -> str:
@@ -325,7 +340,7 @@ def run_job(job_id: str, source: Path | None, reference_text: str, text: str, la
 
         job["status"] = "packing"
         # Applied after Whisper picked the takes, so scoring always sees the raw audio.
-        parts = [change_speed(part, speed) for part in parts]
+        parts = [change_speed(trim_silence(part, sample_rate), speed) for part in parts]
         silence = np.zeros(int(sample_rate * pause), dtype="float32")
         full = []
         for index, part in enumerate(parts):

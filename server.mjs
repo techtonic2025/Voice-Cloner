@@ -117,6 +117,24 @@ display = displèi
 privacy = pràivasi
 weekend = uìkend
 streaming = strìming
+face = fèis
+Hugging Face = àgghin fèis
+Facebook = fèisbuk
+interface = ìnterfeis
+feature = fìciur
+cloud = clàud
+tool = tùl
+free = frì
+store = stòr
+home = hòum
+design = disàin
+game = ghèim
+gaming = ghèiming
+web = uèb
+voice = vòis
+image = ìmmig
+prompt = pròmpt
+open source = òpen sors
 `;
 
 async function readPronunciations() {
@@ -374,7 +392,7 @@ const server = createServer(async (req, res) => {
       if (cost.recommendedBudget > budgetCap) return send(res, 400, { error: `La stima prudente ($${cost.recommendedBudget}) supera il tuo tetto di $${budgetCap}.` });
       const voice = JSON.parse(await readFile(join(VOICES, selectedVoice, 'profile.json'), 'utf8'));
       const language = ['Italian', 'English', 'Spanish', 'French'].includes(input.language) ? input.language : 'Italian';
-      const pause = Math.min(2, Math.max(0, Number(input.pause) || 0.35));
+      const pause = Math.min(2, Math.max(0, Number.isFinite(Number(input.pause)) && input.pause !== '' && input.pause != null ? Number(input.pause) : 0.35));
       try {
         const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text, language, maxRate, budgetCap, pause, keepAlive: input.keepAlive === true,
           stability: ['natural', 'stable', 'very'].includes(input.stability) ? input.stability : 'stable',
