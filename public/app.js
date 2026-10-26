@@ -591,6 +591,7 @@ $('startTraining').addEventListener('click', async () => {
   $('startTraining').disabled = true;
   $('cancelTraining').hidden = false;
   $('trainProgress').hidden = false;
+  $('trainDetails').open = true; // A running training is always in view.
   try {
     for (;;) {
       const { job } = await (await fetch(`/api/jobs/${trainingJob}`)).json();

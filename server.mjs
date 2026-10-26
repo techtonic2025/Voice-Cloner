@@ -151,6 +151,13 @@ function parsePronunciations(source) {
     .sort((a, b) => b[0].length - a[0].length);
 }
 
+// Minors in a sexual context are refused before any GPU is rented.
+const MINOR_WORDS = /\b(bambin[aeio]|ragazzin[aeio]|minorenn[ei]|scolar[aeio]|neonat[aeio]|child(ren)?|kids?|teen(ager)?s?|underage|loli|preteens?|schoolgirls?|schoolboys?|(1[0-7]|[1-9])\s*(anni|years?\s*old|yo))\b/i;
+const SEXUAL_WORDS = /\b(nud[aeio]|nudes?|naked|sex\w*|sess\w*|erotic\w*|porn\w*|lingerie|intimo|seducent[ei]|sensual\w*|topless|nsfw)\b/i;
+function forbiddenImagePrompt(prompt) {
+  return MINOR_WORDS.test(prompt) && SEXUAL_WORDS.test(prompt);
+}
+
 // Image presets: the style is appended to the user's prompt (FLUX follows English best);
 // formats are FLUX-friendly sizes around one megapixel, multiples of 16.
 const IMAGE_STYLES = {
@@ -412,6 +419,7 @@ const server = createServer(async (req, res) => {
       const prompt = String(input.prompt || '').trim().slice(0, 2000);
       if (!prompt) return send(res, 400, { error: 'Descrivi l’immagine da generare.' });
       if (!(await readHf()).token) return send(res, 400, { error: 'Serve il token Hugging Face (riquadro “Addestra la tua voce”) e la licenza di FLUX.1-dev accettata su Hugging Face.' });
+      if (forbiddenImagePrompt(String(input.prompt || ''))) return send(res, 400, { error: 'Richiesta rifiutata: niente contenuti sessuali che coinvolgono minori.' });
       const style = IMAGE_STYLES[input.style] ? input.style : 'photo';
       const format = IMAGE_FORMATS[input.format] ? input.format : 'square';
       const [width, height] = IMAGE_FORMATS[format];

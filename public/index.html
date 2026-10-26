@@ -46,8 +46,8 @@
         </section>
       </section>
 
-      <section class="card form" id="trainCard">
-        <div class="heading"><h2>Addestra la tua voce</h2><p>Come il “Professional Voice Cloning”: da 30–60 minuti di registrazioni vere il modello impara come parli tu, accento compreso. Si fa una volta sola.</p></div>
+      <section class="card form" id="trainCard"><details id="trainDetails">
+        <summary class="card-toggle"><div class="heading"><h2>Addestra la tua voce <span class="badge">Una volta sola</span></h2><p>Come il “Professional Voice Cloning”: da 30–60 minuti di registrazioni vere il modello impara come parli tu, accento compreso. Clicca per aprire.</p></div></summary>
         <h3>1. Token Hugging Face</h3>
         <p class="helper">Il modello addestrato viene salvato in un tuo repository <b>privato</b> su Hugging Face. Crea un token con permesso <b>Write</b> su huggingface.co → Settings → Access Tokens. Resta salvato solo su questo PC.</p>
         <div class="actions"><input id="hfToken" class="token-input" type="password" autocomplete="off" placeholder="hf_…" /><button type="button" id="saveHf" class="ghost">Salva token</button></div>
@@ -68,7 +68,7 @@
           <div class="progress-track"><span id="trainBar"></span></div>
           <p id="trainDetail"></p>
         </section>
-      </section>
+      </details></section>
 
       <section class="card form" id="generateCard">
         <div class="heading"><h2>Genera una voce</h2><p>Scegli il profilo vocale e scrivi cosa deve dire.</p></div>

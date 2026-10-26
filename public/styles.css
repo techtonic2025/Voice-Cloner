@@ -188,6 +188,13 @@ code { font: 13px ui-monospace, Consolas, monospace; color: #ffb27a; background:
 .history-list { display: grid; gap: 12px; margin-top: 18px; }
 .history-item { padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--glass-soft); transition: border-color .2s; }
 .history-item:hover { border-color: rgba(255, 122, 26, .3); }
+.card-toggle { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; list-style: none; }
+.card-toggle::-webkit-details-marker { display: none; }
+.card-toggle .heading { flex: 1; margin-bottom: 0; }
+.card-toggle::after { content: "▸"; color: var(--orange); font-size: 20px; line-height: 1.4; transition: transform .2s; }
+details[open] > .card-toggle::after { transform: rotate(90deg); }
+details[open] > .card-toggle .heading { margin-bottom: 18px; }
+.card-toggle h2 .badge { vertical-align: middle; margin-left: 8px; }
 .history-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; }
 .history-select { accent-color: var(--orange); width: 18px; height: 18px; margin: 19px 0 0; cursor: pointer; }
 .history-head { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; cursor: pointer; list-style: none; }
