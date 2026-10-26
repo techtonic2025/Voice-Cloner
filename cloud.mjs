@@ -21,6 +21,8 @@ const BOOT_TIMEOUT_MS = 20 * 60_000;
 const KEEP_ALIVE_MS = Number(process.env.CLOVA_KEEP_ALIVE_MS) || 5 * 60_000;
 // Bump when the worker changes how it prepares the reference, so old clips are redone.
 const CLIP_VERSION = 2;
+// Worker errors that mean the host itself cannot reach Hugging Face.
+const HOST_NETWORK_ERROR = /CERTIFICATE_VERIFY_FAILED|SSLError|MaxRetryError|ConnectionPool|Connection(Error| refused| reset)|Name or service not known|Temporary failure in name resolution/i;
 // Sampling presets sent to the worker; "natural" keeps the model defaults (temperature 0.9, top_p 1).
 const STABILITY = { stable: { temperature: 0.6, topP: 0.9 }, very: { temperature: 0.4, topP: 0.8 } };
 
@@ -197,7 +199,17 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    run(job, controller.signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds })
+    const options = { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds };
+    run(job, controller.signal, options)
+      .catch(async (error) => {
+        // Some hosts cannot reach Hugging Face over HTTPS (broken certificates or a proxy):
+        // that host is already marked bad and destroyed, so one more try lands elsewhere.
+        if (!error.hostNetwork || controller.signal.aborted) throw error;
+        const previousCost = job.cost || 0;
+        Object.assign(job, { status: 'searching', percent: 2, detail: 'La GPU non raggiungeva Hugging Face: è stata distrutta, ne cerco un’altra…', reused: false });
+        await run(job, controller.signal, options);
+        job.cost = +(job.cost + previousCost).toFixed(4);
+      })
       .catch((error) => Object.assign(job, { status: 'error', error: controller.signal.reason?.message || error.message }))
       .finally(() => { clearTimeout(watchdog); running = null; });
     return job;
@@ -232,7 +244,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
           }
         });
         // Registered immediately so any later failure still destroys it.
-        session = { instanceId: created.new_contract, kind, token, gpu: offer.gpu_name, rate: offer.dph_total, rentedAt: Date.now(), address: null, keepUntil: null };
+        session = { instanceId: created.new_contract, machineId: offer.machine_id, kind, token, gpu: offer.gpu_name, rate: offer.dph_total, rentedAt: Date.now(), address: null, keepUntil: null };
         await track(session.instanceId);
       } catch (error) {
         if (signal.aborted) throw error;
@@ -348,6 +360,10 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         await sleep(2500, signal);
         updateCost();
         remote = await (await worker(`/jobs/${submittedData.id}`)).json();
+        if (remote.status === 'error' && HOST_NETWORK_ERROR.test(remote.error)) {
+          await markBadHost(current.machineId);
+          throw Object.assign(new Error(`La GPU ${current.gpu} non riesce a collegarsi a Hugging Face per scaricare il modello addestrato.`), { hostNetwork: true });
+        }
         if (remote.status === 'error') throw new Error(remote.error);
         if (remote.status === 'done') break;
         if (remote.status === 'generating' && remote.total) {
