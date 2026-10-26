@@ -21,6 +21,11 @@ const IMAGE_LORAS = [
   // Realistic gore; strongest when the prompt contains its trigger word "ccRealGore".
   'CosmicCrafter/real-gore-by-cosmic:real-gore-by-cosmic.safetensors:0.8'
 ];
+// Edits (FLUX Kontext) keep the subject's body only with lighter LoRAs, and no gore.
+const IMAGE_EDIT_LORAS = [
+  'lustlyai/Flux_Lustly.ai_Uncensored_nsfw_v1:flux_lustly-ai_v1.safetensors:0.5',
+  'Keltezaa/NSFW_MASTER_FLUX:NSFW_master_Flux.safetensors:0.25'
+];
 // What each kind of worker needs from a GPU. imageMB is the Docker image, extraMB what
 // the worker downloads at startup (FLUX weights), downloadGB what the host bills as traffic
 // (measured on Vast invoices: some hosts charge up to $0.04/GB, more than the GPU itself).
@@ -254,7 +259,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
           method: 'PUT', signal,
           body: {
             client_id: 'me', image: profile.image, label: `${LABEL_PREFIX}${job.id.slice(0, 8)}`,
-            disk: profile.disk, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${kind === 'images' && IMAGE_LORAS_ENABLED ? ` -e FLUX_LORAS=${IMAGE_LORAS.join(',')}` : ''}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
+            disk: profile.disk, runtype: 'args', env: `-p 8000:8000 -e CLOVA_JOB_TOKEN=${token} -e CLOVA_BATCH_SIZE=${batchSize}${kind === 'images' && IMAGE_LORAS_ENABLED ? ` -e FLUX_LORAS=${IMAGE_LORAS.join(',')} -e FLUX_EDIT_LORAS=${IMAGE_EDIT_LORAS.join(',')}` : ''}${hfToken ? ` -e HF_TOKEN=${hfToken}` : ''}`,
             ...(IMAGE_LOGIN ? { image_login: IMAGE_LOGIN } : {})
           }
         });

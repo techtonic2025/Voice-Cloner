@@ -44,7 +44,13 @@ KONTEXT_REPO = os.getenv("KONTEXT_REPO", "black-forest-labs/FLUX.1-Kontext-dev")
 KONTEXT_DIR = Path(os.getenv("KONTEXT_DIR", "/models/flux1-kontext-dev"))
 KONTEXT_BYTES = 23.8e9
 # LoRAs fused at startup, "repo:file:scale" separated by commas (set by the app; empty = plain FLUX).
-LORAS = [entry.split(":") for entry in os.getenv("FLUX_LORAS", "").split(",") if entry.count(":") == 2]
+def lora_list(variable: str) -> list[list[str]]:
+    return [entry.split(":") for entry in os.getenv(variable, "").split(",") if entry.count(":") == 2]
+
+
+LORAS = lora_list("FLUX_LORAS")
+# Kontext gets its own, usually lighter, list: strong LoRAs reshape the body being edited.
+EDIT_LORAS = lora_list("FLUX_EDIT_LORAS")
 LORA_ERROR: str | None = None
 JOB_TOKEN = os.getenv("CLOVA_JOB_TOKEN", "")
 WORK_DIR = Path(tempfile.gettempdir()) / "clova-images"
@@ -68,7 +74,7 @@ def load_model() -> None:
         snapshot_download(REPO, local_dir=MODEL_DIR, allow_patterns=ALLOW, token=os.getenv("HF_TOKEN") or None)
         PHASE = "loading"
         pipe = FluxPipeline.from_pretrained(MODEL_DIR, torch_dtype=torch.bfloat16).to("cuda")
-        load_loras(pipe)
+        load_loras(pipe, LORAS)
         PIPE = pipe
         PHASE = "ready"
     except Exception as exc:  # Reported through /health so the orchestrator can give up early.
@@ -80,12 +86,12 @@ def load_model() -> None:
         PHASE = "error"
 
 
-def load_loras(pipe: FluxPipeline | FluxKontextPipeline) -> None:
+def load_loras(pipe: FluxPipeline | FluxKontextPipeline, entries: list[list[str]]) -> None:
     """Fuse the LoRAs into the weights, so generation runs as fast as plain FLUX.
     A LoRA that fails to load is reported in /health and skipped: base FLUX still works."""
     global LORA_ERROR
     names, weights = [], []
-    for index, (repo, filename, scale) in enumerate(LORAS):
+    for index, (repo, filename, scale) in enumerate(entries):
         try:
             path = hf_hub_download(repo, filename, token=os.getenv("HF_TOKEN") or None)
             pipe.load_lora_weights(path, adapter_name=f"lora{index}")
@@ -115,7 +121,7 @@ def health() -> dict[str, object]:
     return {
         "ok": LOAD_ERROR is None, "ready": PIPE is not None, "error": LOAD_ERROR,
         "phase": PHASE, "download": progress, "cuda": torch.cuda.is_available(), "model": REPO,
-        "loras": [repo for repo, _, _ in LORAS], "lora_error": LORA_ERROR,
+        "loras": [repo for repo, _, _ in LORAS], "edit_loras": [repo for repo, _, _ in EDIT_LORAS], "lora_error": LORA_ERROR,
     }
 
 
@@ -155,7 +161,7 @@ def kontext_pipeline(job: dict) -> FluxKontextPipeline:
             text_encoder=PIPE.text_encoder, tokenizer=PIPE.tokenizer,
             text_encoder_2=PIPE.text_encoder_2, tokenizer_2=PIPE.tokenizer_2,
         )
-        load_loras(KONTEXT)
+        load_loras(KONTEXT, EDIT_LORAS)
     return KONTEXT
 
 
