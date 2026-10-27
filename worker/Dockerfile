@@ -17,6 +17,10 @@ RUN python -c "from huggingface_hub import snapshot_download; snapshot_download(
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('mobiuslabsgmbh/faster-whisper-large-v3-turbo', local_dir='/models/faster-whisper-large-v3-turbo')"
 # Speaker verification model, used by /train to measure how close each epoch is to the real voice.
 RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('microsoft/wavlm-base-plus-sv', local_dir='/models/wavlm-base-plus-sv')"
+# UTMOS naturalness predictor (code and weights cached for torch.hub), used to pick takes.
+# It needs torchaudio; installed only if the base image lacks it, without touching torch.
+RUN python -c "import torchaudio" 2>/dev/null || pip install --no-cache-dir --no-deps torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+RUN python -c "import torch; torch.hub.load('tarepan/SpeechMOS:v1.2.0', 'utmos22_strong', trust_repo=True)"
 # Official Qwen3-TTS fine-tuning scripts, used by /train.
 RUN mkdir -p /app/finetuning && python -c "import urllib.request as u; [u.urlretrieve(f'https://raw.githubusercontent.com/QwenLM/Qwen3-TTS/main/finetuning/{n}', f'/app/finetuning/{n}') for n in ('sft_12hz.py', 'dataset.py', 'prepare_data.py')]"
 COPY app.py train.py ./

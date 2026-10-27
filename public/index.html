@@ -74,6 +74,10 @@
         <div class="heading"><h2>Genera una voce</h2><p>Scegli il profilo vocale e scrivi cosa deve dire.</p></div>
         <label>Voce da usare<select id="voiceSelect"><option value="">Prima salva o scegli una voce…</option></select></label>
         <label>Testo da trasformare in voce<textarea id="text" rows="8" placeholder="Incolla qui il tuo copione..."></textarea><small id="characters">0 caratteri</small></label>
+        <div class="word-check">
+          <div class="actions"><button type="button" id="checkWords" class="ghost">Controlla le parole straniere</button><span class="muted" id="checkStatus"></span></div>
+          <div class="check-list" id="checkList" hidden></div>
+        </div>
         <div class="two">
           <label>Tetto massimo per questo job (USD)<input id="budget" type="number" min="0.10" step="0.10" value="1.00" /><small>La generazione non parte se la stima lo supera, e la GPU viene distrutta comunque al raggiungimento di questo tetto.</small></label>
           <label>Lingua<select id="language"><option value="Italian">Italiano</option><option value="English">English</option><option value="Spanish">Español</option><option value="French">Français</option></select><small>Usa la lingua del testo.</small></label>
@@ -82,11 +86,11 @@
         <details id="pronunciationPanel"><summary>Dizionario di pronuncia (parole straniere)</summary>
           <p class="helper">Il modello legge tutto con le regole dell’italiano: qui scrivi come pronunciare le parole straniere. Una per riga, nel formato <code>parola = pronuncia</code>. Vale solo per i testi in italiano.</p>
           <label>Parole<textarea id="pronunciations" rows="10" spellcheck="false"></textarea></label>
-          <div class="actions"><button type="button" id="savePronunciations" class="ghost">Salva dizionario</button><span class="muted" id="pronunciationStatus"></span></div>
+          <div class="actions"><button type="button" id="savePronunciations" class="ghost">Salva dizionario</button><button type="button" id="mergePronunciations" class="ghost">Aggiungi le parole della lista base</button><span class="muted" id="pronunciationStatus"></span></div>
         </details>
         <div class="two">
           <label>Stabilità della lettura<select id="stability"><option value="natural">Naturale (più espressiva, più errori)</option><option value="stable" selected>Stabile (consigliata)</option><option value="very">Molto stabile (pochissimi errori, più piatta)</option></select><small>Meno variazione = meno doppie inventate e parole storpiate.</small></label>
-          <label>Qualità<select id="quality"><option value="normal">Normale (1 tentativo per blocco)</option><option value="high">Alta (3 tentativi, sceglie il migliore)</option></select><small>Con “Alta” Whisper ascolta ogni tentativo e tiene quello più fedele al testo. Più lento.</small></label>
+          <label>Qualità<select id="quality"><option value="normal">Normale (1 tentativo per blocco)</option><option value="high">Alta (3 tentativi, sceglie il migliore)</option><option value="max">Massima (rifà i blocchi venuti meno bene)</option></select><small>Con “Alta” ogni tentativo viene ascoltato: Whisper controlla le parole, UTMOS quanto suona naturale, e resta il migliore. “Massima” rigenera fino a due volte i blocchi ancora deboli. Più lento.</small></label>
         </div>
         <label id="refLengthLabel">Lunghezza del campione<select id="refLength"><option value="short">Breve (~20 s): accento più naturale, timbro meno simile</option><option value="medium">Media (~40 s): compromesso</option><option value="full" selected>Completa (fino a 2 min): timbro più simile</option></select><small>Quanta parte della tua registrazione usa Qwen come modello. Se con testi nuovi sembri “straniero”, prova Breve o Media.</small></label>
         <label>Velocità<select id="speed"><option value="0.8">80% (molto più lenta)</option><option value="0.85">85%</option><option value="0.9">90%</option><option value="0.95">95%</option><option value="1" selected>100% (come genera il modello)</option><option value="1.05">105%</option><option value="1.1">110% (più veloce)</option></select><small>Rallenta o accelera l’audio finale senza cambiare il tono della voce. Il modello imita il ritmo del campione: se parla troppo veloce, prova 85–90%.</small></label>

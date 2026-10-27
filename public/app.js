@@ -212,7 +212,7 @@ $('generateButton').addEventListener('click', async () => {
       $('player').src = job.files.full;
       $('downloadAudio').href = `${job.files.full}?download`;
       $('downloadParts').href = `${job.files.parts}?download`;
-      const check = job.quality ? ` · fedeltà al testo ${Math.round(job.quality * 100)}%${job.weakest?.length ? ` (da riascoltare: blocchi ${job.weakest.join(', ')})` : ''}` : '';
+      const check = job.quality ? ` · fedeltà al testo ${Math.round(job.quality * 100)}%${job.naturalness ? ` · naturalezza ${job.naturalness.toLocaleString('it-IT')}/5` : ''}${job.weakest?.length ? ` (da riascoltare: blocchi ${job.weakest.join(', ')})` : ''}` : '';
       $('outputInfo').textContent = `${job.chunks} blocchi · ${job.audioSeconds} secondi di audio · costo GPU stimato $${job.cost}${check}`;
       $('audioOutput').hidden = false;
       await loadVoices(voiceId);
@@ -537,16 +537,100 @@ async function loadPronunciations() {
   if (response.ok) $('pronunciations').value = (await response.json()).text;
 }
 
+async function savePronunciations(message) {
+  const response = await fetch('/api/pronunciations', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: $('pronunciations').value }) });
+  const data = await response.json();
+  $('pronunciationStatus').textContent = response.ok ? (message || `Salvato: ${data.entries} parole.`) : data.error;
+  if (!response.ok) throw new Error(data.error);
+}
+
 $('savePronunciations').addEventListener('click', async () => {
   $('pronunciationStatus').textContent = 'Salvataggio…';
+  try { await savePronunciations(); } catch { $('pronunciationStatus').textContent ||= 'Server non raggiungibile.'; }
+});
+
+$('mergePronunciations').addEventListener('click', async () => {
+  $('pronunciationStatus').textContent = 'Aggiungo…';
   try {
-    const response = await fetch('/api/pronunciations', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: $('pronunciations').value }) });
+    const response = await fetch('/api/pronunciations/merge-base', { method: 'POST' });
     const data = await response.json();
-    $('pronunciationStatus').textContent = response.ok ? `Salvato: ${data.entries} parole.` : data.error;
+    if (!data.added) { $('pronunciationStatus').textContent = 'Hai già tutte le parole della lista base.'; return; }
+    $('pronunciations').value = data.text;
+    await savePronunciations(`Aggiunte ${data.added} parole dalla lista base.`);
   } catch {
     $('pronunciationStatus').textContent = 'Server non raggiungibile.';
   }
 });
+
+// Foreign-word check: lists the words of the script the dictionary does not cover yet,
+// with a suggested spelling to fix and add in one click. "Ignora" lasts until reload.
+const ignoredWords = new Set();
+let checkTimer = null;
+
+async function findUnknownWords() {
+  if ($('language').value !== 'Italian' || !text.value.trim()) return [];
+  const response = await fetch('/api/pronunciations/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: text.value }) });
+  return ((await response.json()).words || []).filter(({ word }) => !ignoredWords.has(word));
+}
+
+function showCheckStatus(words) {
+  $('checkStatus').textContent = $('language').value !== 'Italian' ? 'Il controllo vale solo per i testi in italiano.'
+    : words.length ? `${words.length} ${words.length === 1 ? 'parola' : 'parole'} da controllare`
+    : (text.value.trim() ? 'Nessuna parola straniera fuori dal dizionario ✓' : '');
+}
+
+async function addToDictionary(entries) {
+  const lines = entries.map(({ word, spoken }) => `${word} = ${spoken}`).join('\n');
+  $('pronunciations').value = `${$('pronunciations').value.trimEnd()}\n${lines}\n`;
+  await savePronunciations(`Aggiunte al dizionario: ${entries.map(({ word }) => word).join(', ')}.`);
+}
+
+async function renderCheckList() {
+  const words = await findUnknownWords();
+  showCheckStatus(words);
+  const list = $('checkList');
+  list.hidden = !words.length;
+  list.replaceChildren();
+  if (!words.length) return;
+  const head = document.createElement('div');
+  head.className = 'check-head';
+  head.innerHTML = '<span>Correggi la pronuncia proposta (accento con à è ì ò ù), poi aggiungi. Le sigle in maiuscolo valgono solo in maiuscolo.</span><button type="button" class="ghost">Aggiungi tutte</button>';
+  head.querySelector('button').addEventListener('click', async () => {
+    const entries = [...list.querySelectorAll('.check-row')]
+      .map((row) => ({ word: row.dataset.word, spoken: row.querySelector('input').value.trim() }))
+      .filter(({ spoken }) => spoken);
+    await addToDictionary(entries);
+    renderCheckList();
+  });
+  list.append(head);
+  for (const { word, count, suggestion } of words) {
+    const row = document.createElement('div');
+    row.className = 'check-row';
+    row.dataset.word = word;
+    row.innerHTML = '<b></b><small></small><input type="text" spellcheck="false" /><button type="button" class="ghost">Aggiungi</button><button type="button" class="secondary">Ignora</button>';
+    row.querySelector('b').textContent = word;
+    row.querySelector('small').textContent = count > 1 ? `×${count}` : '';
+    row.querySelector('input').value = suggestion;
+    const [add, ignore] = row.querySelectorAll('button');
+    add.addEventListener('click', async () => {
+      const spoken = row.querySelector('input').value.trim();
+      if (!spoken) return;
+      await addToDictionary([{ word, spoken }]);
+      renderCheckList();
+    });
+    ignore.addEventListener('click', () => { ignoredWords.add(word); renderCheckList(); });
+    list.append(row);
+  }
+}
+
+$('checkWords').addEventListener('click', () => renderCheckList().catch(() => { $('checkStatus').textContent = 'Server non raggiungibile.'; }));
+// While typing only the counter is refreshed; the list opens with the button.
+for (const [field, event] of [[text, 'input'], [$('language'), 'change']]) {
+  field.addEventListener(event, () => {
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(() => findUnknownWords().then(showCheckStatus).catch(() => {}), 700);
+  });
+}
 
 loadPronunciations().catch(() => {});
 

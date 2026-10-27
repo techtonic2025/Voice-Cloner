@@ -34,6 +34,10 @@ import train as trainer
 app = FastAPI(title="Clova Voice Qwen worker", docs_url=None, redoc_url=None)
 MODEL: Qwen3TTSModel | None = None
 TRANSCRIBER: WhisperModel | None = None
+# UTMOS rates how natural a take sounds (1-5): with several takes it breaks ties
+# between takes Whisper finds equally faithful, and flags slurred ones.
+MOS_MODEL: torch.nn.Module | None = None
+MOS_ERROR: str | None = None
 LOAD_ERROR: str | None = None
 GPU_LOCK = threading.Lock()
 MODEL_PATH = os.getenv("QWEN_MODEL_PATH", "/models/qwen3-tts-1.7b-base")
@@ -88,6 +92,20 @@ def load_models() -> None:
         TRANSCRIBER = WhisperModel(WHISPER_MODEL_PATH, device="cuda", compute_type="float16")
     except Exception as exc:  # Reported through /health so the orchestrator can give up early.
         LOAD_ERROR = str(exc)
+        return
+    load_mos()
+
+
+def load_mos() -> None:
+    """Optional: without it takes are chosen on Whisper's word match alone."""
+    global MOS_MODEL, MOS_ERROR
+    try:
+        cached = Path(torch.hub.get_dir()) / "tarepan_SpeechMOS_v1.2.0"
+        model = (torch.hub.load(str(cached), "utmos22_strong", source="local") if cached.exists()
+                 else torch.hub.load("tarepan/SpeechMOS:v1.2.0", "utmos22_strong", trust_repo=True))
+        MOS_MODEL = model.to("cuda").eval()
+    except Exception as exc:
+        MOS_ERROR = str(exc)[:300]
 
 
 def get_trained(repo: str) -> Qwen3TTSModel:
@@ -327,10 +345,30 @@ def take_score(wav: np.ndarray, sample_rate: int, target: str, language: str) ->
     return score
 
 
+def naturalness(wav: np.ndarray, sample_rate: int) -> float:
+    """UTMOS score of a take, 1 (robotic, slurred) to 5 (natural); 3.5 when the model is missing."""
+    if MOS_MODEL is None or len(wav) < sample_rate // 4:
+        return 3.5
+    length = int(len(wav) * 16_000 / sample_rate)
+    audio16 = np.interp(np.linspace(0, len(wav) - 1, length), np.arange(len(wav)), wav).astype("float32")
+    with torch.inference_mode():
+        return float(MOS_MODEL(torch.from_numpy(audio16).unsqueeze(0).to("cuda"), 16_000).item())
+
+
+def take_rank(fidelity: float, mos: float) -> float:
+    """Words first: one wrong word in a 150-character chunk costs about 0.04 of fidelity,
+    so a full MOS point (0.06) only wins between takes that say the text equally well."""
+    return fidelity + 0.06 * (mos - 3.5)
+
+
+# "Massima": chunks whose best take is still below these get more takes, up to two more rounds.
+WEAK_FIDELITY, WEAK_MOS, RETRY_ROUNDS = 0.9, 3.0, 2
+
+
 def run_job(job_id: str, source: Path | None, reference_text: str, text: str, language: str, pause: float,
             temperature: float, top_p: float, takes: int, pronunciations: list[list[str]], speed: float,
             ref_seconds: float, trained_repo: str = "", speaker: str = "", target_rate: float = 0.0,
-            chunk_chars: int = CHUNK_CHARS) -> None:
+            chunk_chars: int = CHUNK_CHARS, retry: bool = False) -> None:
     job = JOBS[job_id]
     folder = WORK_DIR / job_id
     sampling: dict[str, object] = {}
@@ -379,31 +417,46 @@ def run_job(job_id: str, source: Path | None, reference_text: str, text: str, la
             spoken = [apply_pronunciations(chunk, pronunciations) for chunk in chunks]
             job.update(status="generating", total=len(chunks), done=0, takes=takes)
             # With several takes per chunk, each copy is sampled independently in the
-            # same batch and Whisper keeps the one that best matches the text.
-            items = [index for index in range(len(chunks)) for _ in range(takes)]
-            candidates: list[list[np.ndarray]] = [[] for _ in chunks]
+            # same batch; Whisper (words) and UTMOS (naturalness) score every take as it
+            # comes, and the best one is kept.
+            candidates: list[list[tuple[float, float, np.ndarray]]] = [[] for _ in chunks]
             sample_rate = 24_000
-            for offset in range(0, len(items), BATCH_SIZE):
-                batch = items[offset:offset + BATCH_SIZE]
-                wavs, sample_rate = synthesize([spoken[i] for i in batch])
-                for index, wav in zip(batch, wavs):
-                    candidates[index].append(np.asarray(wav, dtype="float32").reshape(-1))
-                job["done"] = sum(len(c) == takes for c in candidates)
 
-            parts: list[np.ndarray] = []
-            scores: list[float] = []
-            for chunk, options in zip(chunks, candidates):
-                if takes == 1:
-                    parts.append(options[0])
-                    continue
-                job["status"] = "checking"
-                ranked = [(take_score(wav, sample_rate, chunk, language), wav) for wav in options]
-                best_score, best = max(ranked, key=lambda pair: pair[0])
-                parts.append(best)
-                scores.append(round(best_score, 3))
-            if scores:
-                job["quality"] = round(sum(scores) / len(scores), 3)
-                job["weakest"] = [i + 1 for i, value in enumerate(scores) if value < 0.85]
+            def generate(chunk_indexes: list[int]) -> None:
+                nonlocal sample_rate
+                items = [index for index in chunk_indexes for _ in range(takes)]
+                made = {index: 0 for index in chunk_indexes}
+                for offset in range(0, len(items), BATCH_SIZE):
+                    batch = items[offset:offset + BATCH_SIZE]
+                    wavs, sample_rate = synthesize([spoken[i] for i in batch])
+                    for index, wav in zip(batch, wavs):
+                        wav = np.asarray(wav, dtype="float32").reshape(-1)
+                        scored = (1.0, 3.5) if takes == 1 else (take_score(wav, sample_rate, chunks[index], language),
+                                                                naturalness(wav, sample_rate))
+                        candidates[index].append((*scored, wav))
+                        made[index] += 1
+                    job["done"] = sum(count == takes for count in made.values())
+
+            def best(options: list[tuple[float, float, np.ndarray]]) -> tuple[float, float, np.ndarray]:
+                return max(options, key=lambda option: take_rank(option[0], option[1]))
+
+            generate(list(range(len(chunks))))
+            for round_number in range(RETRY_ROUNDS if retry and takes > 1 else 0):
+                weak = [i for i, options in enumerate(candidates)
+                        if best(options)[0] < WEAK_FIDELITY or best(options)[1] < WEAK_MOS]
+                if not weak:
+                    break
+                job.update(status="improving", total=len(weak), done=0, round=round_number + 1)
+                generate(weak)
+
+            job.update(total=len(chunks), done=len(chunks))
+            chosen = [best(options) for options in candidates]
+            parts = [wav for _, _, wav in chosen]
+            if takes > 1:
+                job["quality"] = round(sum(fidelity for fidelity, _, _ in chosen) / len(chosen), 3)
+                job["weakest"] = [i + 1 for i, (fidelity, _, _) in enumerate(chosen) if fidelity < 0.85]
+                if MOS_MODEL is not None:
+                    job["naturalness"] = round(sum(mos for _, mos, _ in chosen) / len(chosen), 2)
 
         job["status"] = "packing"
         # Applied after Whisper picked the takes, so scoring always sees the raw audio.
@@ -436,11 +489,14 @@ def run_job(job_id: str, source: Path | None, reference_text: str, text: str, la
 def health() -> dict[str, object]:
     return {
         "ok": LOAD_ERROR is None,
-        "ready": MODEL is not None and TRANSCRIBER is not None,
+        # Ready once UTMOS has loaded or failed, so the first takes are scored like the rest.
+        "ready": MODEL is not None and TRANSCRIBER is not None and (MOS_MODEL is not None or MOS_ERROR is not None),
         "error": LOAD_ERROR,
         "cuda": torch.cuda.is_available(),
         "attention": attention_implementation(),
         "flash_attn_error": FLASH_ATTN_ERROR,
+        "mos": MOS_MODEL is not None,
+        "mos_error": MOS_ERROR,
         "torch": torch.__version__,
         "model": "Qwen3-TTS-12Hz-1.7B-Base",
     }
@@ -463,6 +519,7 @@ async def create_job(
     ref_seconds: float = Form(REF_MAX_SECONDS),
     target_rate: float = Form(0.0),
     chunk_chars: int = Form(CHUNK_CHARS),
+    retry: bool = Form(False),
     authorization: str | None = Header(default=None),
 ) -> dict[str, object]:
     require_token(authorization)
@@ -498,7 +555,7 @@ async def create_job(
         args=(job_id, source, reference_text, text, language, min(max(pause, 0), 2), min(max(temperature, 0), 1.5),
               min(max(top_p, 0), 1), min(max(takes, 1), 3), entries, min(max(speed, 0.7), 1.3),
               min(max(ref_seconds, 10.0), REF_MAX_SECONDS), trained_repo, speaker, min(max(target_rate, 0.0), 12.0),
-              min(max(chunk_chars, 80), 600)),
+              min(max(chunk_chars, 80), 600), retry),
         daemon=True,
     ).start()
     return {"id": job_id}

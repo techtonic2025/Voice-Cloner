@@ -212,7 +212,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     return null;
   }
 
-  function startJob({ voice, text, language, maxRate, budgetCap, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars }) {
+  function startJob({ voice, text, displayText, retry, language, maxRate, budgetCap, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars }) {
     if (running) throw new Error('C’è già una generazione in corso. Attendi o annullala.');
     const job = {
       id: randomUUID(), status: 'searching', percent: 2, detail: 'Cerco una GPU adatta…',
@@ -225,7 +225,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     job.cancel = () => controller.abort(new Error('Generazione annullata.'));
     jobs.set(job.id, job);
     running = job;
-    const options = { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars };
+    const options = { voice, text, displayText, retry, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars };
     run(job, controller.signal, options)
       .catch(async (error) => {
         // Some hosts cannot reach Hugging Face over HTTPS (broken certificates or a proxy):
@@ -337,7 +337,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
     return current;
   }
 
-  async function run(job, signal, { voice, text, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars }) {
+  async function run(job, signal, { voice, text, displayText, retry, language, maxRate, pause, keepAlive, stability, takes, pronunciations, speed, refSeconds, chunkChars }) {
     const set = (status, percent, detail) => Object.assign(job, { status, percent, detail });
     let current = null;
     let success = false;
@@ -381,6 +381,7 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
       const sampling = STABILITY[stability];
       if (sampling) { form.append('temperature', String(sampling.temperature)); form.append('top_p', String(sampling.topP)); }
       form.append('takes', String(takes));
+      form.append('retry', retry ? 'true' : 'false');
       form.append('pronunciations', JSON.stringify(pronunciations || []));
       form.append('speed', String(speed || 1));
       form.append('ref_seconds', String(refSeconds || 120));
@@ -403,6 +404,8 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         if (remote.status === 'done') break;
         if (remote.status === 'generating' && remote.total) {
           set('generating', 50 + Math.round((remote.done / remote.total) * 40), `Sintesi con la tua voce: blocco ${remote.done} di ${remote.total}`);
+        } else if (remote.status === 'improving') {
+          set('generating', 90, `Qualità massima: rifaccio ${remote.total} ${remote.total === 1 ? 'blocco venuto' : 'blocchi venuti'} meno bene (giro ${remote.round} di 2), ${remote.done} pronti…`);
         } else if (remote.status === 'checking') {
           set('generating', 91, `Whisper ascolta i ${remote.takes} tentativi di ogni blocco e sceglie i migliori…`);
         } else {
@@ -431,11 +434,11 @@ export function createCloud({ root, voicesDir, getHfToken = async () => '' }) {
         await writeFile(profilePath, JSON.stringify({ ...profile, clipFilename: 'reference-clip.wav', referenceText: remote.reference_text, clipVersion: CLIP_VERSION }, null, 2));
       }
       updateCost();
-      Object.assign(job, { files: { full: `/api/jobs/${job.id}/files/clova-voice.wav`, parts: `/api/jobs/${job.id}/files/clova-voice-blocchi.zip` }, chunks: remote.total, audioSeconds: remote.seconds, quality: remote.quality, weakest: remote.weakest });
+      Object.assign(job, { files: { full: `/api/jobs/${job.id}/files/clova-voice.wav`, parts: `/api/jobs/${job.id}/files/clova-voice-blocchi.zip` }, chunks: remote.total, audioSeconds: remote.seconds, quality: remote.quality, weakest: remote.weakest, naturalness: remote.naturalness });
       // Saved next to the audio so the history survives app restarts.
       await writeFile(join(folder, 'meta.json'), JSON.stringify({
         id: job.id, createdAt: new Date(job.startedAt).toISOString(), voiceId: voice.id, voiceName: voice.name,
-        language, text, stability, takes, speed: speed || 1, refSeconds: refSeconds || 120, chunks: job.chunks, audioSeconds: job.audioSeconds,
+        language, text: displayText || text, stability, takes, speed: speed || 1, refSeconds: refSeconds || 120, chunks: job.chunks, audioSeconds: job.audioSeconds,
         quality: job.quality ?? null, weakest: job.weakest ?? [], gpu: job.gpu, cost: job.cost
       }, null, 2));
       success = true;

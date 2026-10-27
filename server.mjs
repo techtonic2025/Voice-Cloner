@@ -89,56 +89,10 @@ function estimate({ characters = 5000, hourlyRate = 0.20, minutes = 15, safetyMi
 // so it can still check each take against the original spelling.
 // One "parola = pronuncia" per line, editable from the page; lines starting with # are comments.
 const PRONUNCIATIONS = join(ROOT, 'data', 'pronunce.txt');
-const DEFAULT_PRONUNCIATIONS = `# Una riga per parola: parola = come va pronunciata (vale solo per i testi in italiano).
-# Le maiuscole non contano. Gli accenti indicano dove cade l'accento.
-file = fàil
-like = làik
-download = daunlòd
-upload = aplòd
-online = onlàin
-offline = offlàin
-browser = brauser
-computer = compiùter
-software = sòftuer
-hardware = hàrduer
-mouse = maus
-email = imèil
-e-mail = imèil
-team = tìm
-feedback = fìdbek
-smartphone = smàrtfon
-YouTube = iutùb
-workflow = uòrkflou
-password = pàssuord
-backup = bècap
-update = apdèit
-setup = setàp
-display = displèi
-privacy = pràivasi
-weekend = uìkend
-streaming = strìming
-face = fèis
-Hugging Face = àgghin fèis
-Facebook = fèisbuk
-interface = ìnterfeis
-feature = fìciur
-cloud = clàud
-tool = tùl
-free = frì
-store = stòr
-home = hòum
-design = disàin
-game = ghèim
-gaming = ghèiming
-web = uèb
-voice = vòis
-image = ìmmig
-prompt = pròmpt
-open source = òpen sors
-`;
+const BASE_PRONUNCIATIONS = join(ROOT, 'pronunce-base.txt');
 
 async function readPronunciations() {
-  try { return await readFile(PRONUNCIATIONS, 'utf8'); } catch { return DEFAULT_PRONUNCIATIONS; }
+  try { return await readFile(PRONUNCIATIONS, 'utf8'); } catch { return readFile(BASE_PRONUNCIATIONS, 'utf8'); }
 }
 
 function parsePronunciations(source) {
@@ -149,6 +103,123 @@ function parsePronunciations(source) {
     .filter(([word, spoken]) => word && spoken)
     // Longest first, so "e-mail" wins over "mail".
     .sort((a, b) => b[0].length - a[0].length);
+}
+
+// Acronyms written in capitals ("AI", "GPU") only match capitals, so the Italian "ai" stays as it is.
+// The worker matches case-insensitively, so these are applied here and the rest is sent along.
+const isAcronym = (word) => /\p{Lu}/u.test(word) && word === word.toUpperCase();
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const wordPattern = (word, flags) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(word)}(?![\\p{L}\\p{N}])`, flags);
+
+function applyAcronyms(text, entries) {
+  return entries.filter(([word]) => isAcronym(word))
+    .reduce((result, [word, spoken]) => result.replace(wordPattern(word, 'gu'), spoken), text);
+}
+
+// Numbers in words, since Qwen reads "14,7k" as "quattordici sette kappa" and slurs long figures.
+const UNITS = ['zero', 'uno', 'due', 'tre', 'quattro', 'cinque', 'sei', 'sette', 'otto', 'nove', 'dieci', 'undici', 'dodici', 'tredici',
+  'quattordici', 'quindici', 'sedici', 'diciassette', 'diciotto', 'diciannove'];
+const TENS = ['', '', 'venti', 'trenta', 'quaranta', 'cinquanta', 'sessanta', 'settanta', 'ottanta', 'novanta'];
+
+function belowThousand(n) {
+  const hundreds = Math.floor(n / 100), rest = n % 100;
+  let tail = '';
+  if (rest < 20) tail = rest ? UNITS[rest] : '';
+  else {
+    const unit = rest % 10;
+    // "ventuno", "ventotto": the tens drop their vowel before uno and otto; "ventitré" takes the accent.
+    tail = (unit === 1 || unit === 8 ? TENS[Math.floor(rest / 10)].slice(0, -1) : TENS[Math.floor(rest / 10)])
+      + (unit === 3 ? 'tré' : unit ? UNITS[unit] : '');
+  }
+  if (!hundreds) return tail;
+  const head = hundreds === 1 ? 'cento' : `${UNITS[hundreds]}cento`;
+  return /^ott/.test(tail) ? head.slice(0, -1) + tail : head + tail;
+}
+
+function numberToWords(n) {
+  if (n === 0) return 'zero';
+  if (n >= 1e12) return String(n);
+  const parts = [];
+  for (const [size, one, many] of [[1e9, 'un miliardo', 'miliardi'], [1e6, 'un milione', 'milioni']]) {
+    const count = Math.floor(n / size);
+    if (count) parts.push(count === 1 ? one : `${numberToWords(count)} ${many}`);
+    n %= size;
+  }
+  const thousands = Math.floor(n / 1000), rest = n % 1000;
+  const small = (thousands ? (thousands === 1 ? 'mille' : `${belowThousand(thousands)}mila`) : '') + belowThousand(rest);
+  if (small) parts.push(small);
+  return parts.join(parts.length > 1 && !/^(mille|\w+mila)?$/.test(small) ? ' e ' : ' ');
+}
+
+// "3,25" -> "tre virgola venticinque"; leading zeros after the comma are read one by one.
+function decimalToWords(whole, fraction) {
+  const zeros = fraction.match(/^0*/)[0].length;
+  const digits = fraction.slice(zeros);
+  return `${numberToWords(Number(whole))} virgola ${'zero '.repeat(zeros)}${digits ? numberToWords(Number(digits)) : ''}`.trim();
+}
+
+function numbersToWords(text) {
+  const multipliers = { k: 1e3, K: 1e3, mila: 1e3, M: 1e6, mln: 1e6, mld: 1e9 };
+  const amount = String.raw`\d[\d.,]*(?:\s?(?:k|K|M|mln|mld)(?![\p{L}\d]))?`;
+  return text
+    // "$1,05" and "1,05 $" -> "1,05 dollari"; then the figure is read like any other.
+    .replace(new RegExp(String.raw`\$\s?(${amount})`, 'gu'), '$1 dollari').replace(new RegExp(String.raw`€\s?(${amount})`, 'gu'), '$1 euro')
+    .replace(/(\d)\s?\$/g, '$1 dollari').replace(/(\d)\s?€/g, '$1 euro')
+    // "09:57" -> "nove e cinquantasette", "18:00" -> "diciotto".
+    .replace(/(?<![\d:])(\d{1,2}):(\d{2})(?![\d:])/g, (_, h, m) => (m === '00' ? numberToWords(+h) : `${numberToWords(+h)} e ${numberToWords(+m)}`))
+    // "RTX 4090", "GTX 1080": model numbers are read in pairs, "quaranta novanta".
+    .replace(/(\b\p{Lu}{2,}\s)(\d{2})(\d{2})(?!\d|[.,]\d)/gu, (_, name, a, b) => `${name}${numberToWords(+a)} ${b === '00' ? 'cento' : numberToWords(+b)}`)
+    // "14,7k", "1,5M", "3 mln": the amount is worked out and read in full.
+    .replace(/(?<![\p{L}\d]|\d[.,])(\d+(?:[.,]\d+)?)\s?(k|K|M|mln|mld)(?![\p{L}\d])/gu, (_, value, unit) => {
+      const amount = Math.round(Number(value.replace(',', '.')) * multipliers[unit]);
+      return numberToWords(amount);
+    })
+    // "14.700" and "1.250.000": dots as thousands separators.
+    .replace(/(?<![\p{L}\d]|\d[.,])\d{1,3}(?:\.\d{3})+(?!\d|[.,]\d)/gu, (match) => numberToWords(Number(match.replace(/\./g, ''))))
+    .replace(/(?<![\p{L}\d]|\d[.,])(\d+)[.,](\d+)(?![\p{L}\d]|[.,]\d)/gu, (_, whole, fraction) => decimalToWords(whole, fraction))
+    .replace(/(?<![\p{L}\d]|\d[.,])\d+(?![\p{L}\d]|[.,]\d)/gu, (match) => (match.length > 1 && match.startsWith('0') ? [...match].map((d) => UNITS[+d]).join(' ') : numberToWords(Number(match))))
+    .replace(/\s?%/g, ' per cento');
+}
+
+// Words a dictionary entry already covers are blanked out, then what is left is checked
+// for things the Italian rules read wrong: acronyms, English spellings, final consonants.
+const ITALIAN_LETTERS = { A: 'a', B: 'bi', C: 'ci', D: 'di', E: 'e', F: 'effe', G: 'gi', H: 'acca', I: 'i', J: 'i lunga', K: 'cappa', L: 'elle', M: 'emme',
+  N: 'enne', O: 'o', P: 'pi', Q: 'cu', R: 'erre', S: 'esse', T: 'ti', U: 'u', V: 'vu', W: 'doppia vu', X: 'ics', Y: 'ipsilon', Z: 'zeta' };
+const ITALIAN_ENDINGS_OK = new Set(['quel', 'buon', 'gran', 'esser', 'aver', 'signor', 'dottor', 'professor', 'nessun', 'alcun', 'ciascun', 'qual',
+  'tal', 'cuor', 'amor', 'bus', 'autobus', 'camion', 'virus', 'bonus', 'film', 'sport', 'tram', 'gas', 'bar', 'super', 'extra', 'taxi', 'test', 'top', 'stop']);
+
+function suggestSpelling(word) {
+  if (isAcronym(word) && /^[A-Z0-9]{2,6}$/.test(word)) return [...word].map((c) => ITALIAN_LETTERS[c] || c).join(' ');
+  let s = word.toLowerCase();
+  if (/[^aeiou]e$/.test(s) && s.length > 3 && /[aeiouy]/.test(s.slice(0, -1))) s = s.slice(0, -1);
+  return s
+    .replace(/tion/g, 'scion').replace(/igh/g, 'ai').replace(/ph/g, 'f').replace(/th/g, 't').replace(/ck/g, 'k')
+    .replace(/c(?=[ei])/g, 's').replace(/sh(?=[ei])/g, 'sc').replace(/sh/g, 'sci').replace(/ch(?=[ei])/g, 'c').replace(/ch/g, 'ci')
+    .replace(/ee|ea/g, 'i').replace(/oo/g, 'u').replace(/ou|ow$/g, 'au').replace(/ay|ey$/g, 'ei')
+    .replace(/j(?=[ei])/g, 'g').replace(/j/g, 'gi')
+    .replace(/k(?=[ei])/g, 'ch').replace(/k/g, 'c').replace(/w/g, 'u').replace(/y$/g, 'i').replace(/y/g, 'ai');
+}
+
+function looksForeign(word) {
+  if (/[àèéìòóù]/i.test(word) || /^\d+$/.test(word)) return false;
+  if (isAcronym(word)) return /^[A-Z0-9]{2,6}$/.test(word) && /[A-Z]/.test(word) && word.length > 1;
+  const lower = word.toLowerCase();
+  if (/[kwyjx]|sh|th|ee|ck|ght|ay|ey/.test(lower)) return true;
+  return lower.length >= 4 && /[^aeiou]$/.test(lower) && !ITALIAN_ENDINGS_OK.has(lower);
+}
+
+function unknownWords(text, entries) {
+  let rest = text;
+  for (const [word] of entries) rest = rest.replace(wordPattern(word, isAcronym(word) ? 'gu' : 'giu'), ' ');
+  const counts = new Map();
+  for (const word of rest.match(/[\p{L}\p{N}]+(?:[-'’][\p{L}\p{N}]+)*/gu) || []) {
+    const clean = word.replace(/^(?:l|d|un|all|dell|nell|sull|dall|quell)['’]/i, '');
+    if (!looksForeign(clean)) continue;
+    const key = isAcronym(clean) ? clean : clean.toLowerCase();
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts].map(([word, count]) => ({ word, count, suggestion: suggestSpelling(word) }))
+    .sort((a, b) => b.count - a.count || a.word.localeCompare(b.word));
 }
 
 // Minors in a sexual context are refused before any GPU is rented.
@@ -394,6 +465,20 @@ const server = createServer(async (req, res) => {
         return send(res, 202, { id: job.id, repo });
       } catch (error) { return send(res, 409, { error: error.message }); }
     }
+    if (req.method === 'POST' && url.pathname === '/api/pronunciations/check') {
+      const { text = '' } = await body(req);
+      return send(res, 200, { words: unknownWords(String(text).slice(0, 200_000), parsePronunciations(await readPronunciations())) });
+    }
+    // Adds the base list's words that are missing from the user's dictionary, keeping every edit.
+    if (req.method === 'POST' && url.pathname === '/api/pronunciations/merge-base') {
+      const current = await readPronunciations();
+      const known = new Set(parsePronunciations(current).map(([word]) => (isAcronym(word) ? word : word.toLowerCase())));
+      const missing = parsePronunciations(await readFile(BASE_PRONUNCIATIONS, 'utf8'))
+        .filter(([word]) => !known.has(isAcronym(word) ? word : word.toLowerCase()))
+        .map(([word, spoken]) => `${word} = ${spoken}`).sort((a, b) => a.localeCompare(b));
+      const merged = missing.length ? `${current.trimEnd()}\n\n# Aggiunte dalla lista base\n${missing.join('\n')}\n` : current;
+      return send(res, 200, { text: merged, added: missing.length });
+    }
     if (req.method === 'PUT' && url.pathname === '/api/pronunciations') {
       const { text = '' } = await body(req);
       if (String(text).length > 50_000) return send(res, 400, { error: 'Dizionario troppo lungo.' });
@@ -460,14 +545,15 @@ const server = createServer(async (req, res) => {
       const language = ['Italian', 'English', 'Spanish', 'French'].includes(input.language) ? input.language : 'Italian';
       const pause = Math.min(2, Math.max(0, Number.isFinite(Number(input.pause)) && input.pause !== '' && input.pause != null ? Number(input.pause) : 0.35));
       try {
-        const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text, language, maxRate, budgetCap, pause, keepAlive: input.keepAlive === true,
+        const pronunciations = language === 'Italian' ? parsePronunciations(await readPronunciations()) : [];
+        const job = cloud.startJob({ voice: { ...voice, id: selectedVoice }, text: applyAcronyms(language === 'Italian' ? numbersToWords(text) : text, pronunciations), displayText: text, language, maxRate, budgetCap, pause, keepAlive: input.keepAlive === true,
           stability: ['natural', 'stable', 'very'].includes(input.stability) ? input.stability : 'stable',
-          takes: input.quality === 'high' ? 3 : 1,
+          takes: ['high', 'max'].includes(input.quality) ? 3 : 1, retry: input.quality === 'max',
           speed: Math.min(1.3, Math.max(0.7, Number(input.speed) || 1)),
           refSeconds: { short: 20, medium: 40 }[input.refLength] || 120,
           // Fine-tuned voices learned from 3-12 s clips and speak best one or two sentences at a time.
           chunkChars: Math.min(600, Math.max(80, Number(input.chunkChars) || (voice.type === 'trained' ? 150 : 400))),
-          pronunciations: language === 'Italian' ? parsePronunciations(await readPronunciations()) : [] });
+          pronunciations: pronunciations.filter(([word]) => !isAcronym(word)) });
         return send(res, 202, { id: job.id, cost });
       } catch (error) { return send(res, 409, { error: error.message }); }
     }
