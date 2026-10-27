@@ -469,7 +469,7 @@ function setEditSource(source) {
   if (source) $('editThumb').src = `/api/jobs/${source.id}/files/${source.name}`;
   $('imageStyle').disabled = $('imageFormat').disabled = !!source;
   $('imageButton').textContent = source ? 'Modifica immagine' : 'Genera immagini';
-  $('imagePrompt').placeholder = source ? 'Es. make her nude, keep the same face, pose and background'
+  $('imagePrompt').placeholder = source ? 'Es. make the sky a dramatic sunset, keep everything else the same'
     : 'Es. a cozy home studio with a microphone and orange neon lights, evening';
 }
 $('editClear').addEventListener('click', () => setEditSource(null));
